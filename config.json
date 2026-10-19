@@ -1,0 +1,69 @@
+{
+  "nombre_bot": "Elixyr SOC",
+  "prefijo": "g!",
+  
+  "colores": {
+    "principal": 2895667,
+    "exito": 5763719,
+    "error": 15548997,
+    "warn": 16776960,
+    "info": 5793266,
+    "raid": 15548997
+  },
+
+  "textos": {
+    "footer": "Elixyr SOC  ▸  Centro de Operaciones de Seguridad",
+    "verificacion": "Autorice su identidad mediante el panel inferior para acceder a la red segura.",
+    "welcome": "ha ingresado a la red segura"
+  },
+
+  "canales": {
+    "log_channel": null,
+    "audit_channel": null,
+    "alert_channel": null,
+    "welcome_channel": null,
+    "verify_channel": null,
+    "ticket_category": 1558375417323458590,
+    "ticket_log_channel": 1558381819718541352
+  },
+
+  "roles": {
+    "staff_role": 1558505152191926294,
+    "verified_role": null,
+    "guest_role": null,
+    "antinuke_bypass_roles": []
+  },
+
+  "seguridad_automod": {
+    "enabled": true,
+    "ia_enabled": true,
+    "ia_confidence_threshold": 0.85,
+    "spam_limit": 5,
+    "spam_seconds": 5,
+    "mute_minutes": 10,
+    "blacklist": ["puta", "puto", "mierda", "pendejo", "marico", "coño", "verga", "culo"]
+  },
+
+  "seguridad_antiraid": {
+    "enabled": true,
+    "join_limit": 5,
+    "join_seconds": 10,
+    "action": "lockdown",
+    "min_account_age_days": 7
+  },
+
+  "seguridad_antinuke": {
+    "enabled": true,
+    "channel_delete_limit": 3,
+    "role_delete_limit": 3,
+    "ban_limit": 5,
+    "kick_limit": 5,
+    "time_window_seconds": 10,
+    "action": "remove_roles"
+  },
+
+  "seguridad_staff_ip": {
+    "enabled": false,
+    "action": "remove_roles"
+  }
+}
