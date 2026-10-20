@@ -1,10 +1,13 @@
+import sqlite3
 import json
 import os
 import logging
 import threading
 from datetime import datetime, timezone
-from collections import defaultdict
 
+# ═══════════════════════════════════════════
+#  TELEMETRÍA Y LOGGING
+# ═══════════════════════════════════════════
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] [%(levelname)s] [ELIXYR-DB] %(message)s",
@@ -15,21 +18,12 @@ logger = logging.getLogger("ElixyrPublic")
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
-
-GUILDS_FILE = os.path.join(DATA_DIR, "guilds_config.json")
-CASES_FILE = os.path.join(DATA_DIR, "cases.json")
-WARNS_FILE = os.path.join(DATA_DIR, "warns.json")
-NOTES_FILE = os.path.join(DATA_DIR, "notes.json")
+DB_PATH = os.path.join(DATA_DIR, "elixyr_soc.db")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# ═══════════════════════════════════════════
-#  SISTEMA DE CACHÉ Y LOCKS (ANTI-RAID I/O)
-# ═══════════════════════════════════════════
-# Previene corrupción de JSON cuando cientos de 
-# usuarios son sancionados al mismo tiempo.
-_FILE_LOCKS = defaultdict(threading.Lock)
-_MEMORY_CACHE = {}
+# Lock para evitar colisiones de escritura en hilos concurrentes
+db_lock = threading.Lock()
 
 DEFAULT_GUILD_CONFIG = {
     "audit_channel": None,
@@ -51,83 +45,131 @@ DEFAULT_GUILD_CONFIG = {
     "antinuke_seconds": 10
 }
 
-def _cargar_json(path):
-    if path in _MEMORY_CACHE:
-        return _MEMORY_CACHE[path]
+# ═══════════════════════════════════════════
+#  INICIALIZACIÓN DE SQLITE (MODO WAL)
+# ═══════════════════════════════════════════
+def init_db():
+    """Forja las tablas relacionales si no existen y activa el modo de alto rendimiento."""
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        # WAL (Write-Ahead Logging) permite lecturas y escrituras simultáneas ultrarrápidas
+        conn.execute("PRAGMA journal_mode=WAL;")
+        
+        conn.execute('''CREATE TABLE IF NOT EXISTS guild_config (
+                        guild_id TEXT PRIMARY KEY, config_data TEXT)''')
+                        
+        conn.execute('''CREATE TABLE IF NOT EXISTS cases (
+                        case_id TEXT PRIMARY KEY, guild_id TEXT, tipo TEXT, 
+                        usuario_id TEXT, moderador_id TEXT, razon TEXT, 
+                        fecha TEXT, extra TEXT)''')
+                        
+        conn.execute('''CREATE TABLE IF NOT EXISTS warns (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT, 
+                        usuario_id TEXT, moderador_id TEXT, razon TEXT, fecha TEXT)''')
+                        
+        conn.execute('''CREATE TABLE IF NOT EXISTS notes (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id TEXT, 
+                        usuario_id TEXT, autor_id TEXT, nota TEXT, fecha TEXT)''')
+        conn.commit()
+        conn.close()
 
-    with _FILE_LOCKS[path]:
-        if not os.path.exists(path):
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({}, f)
-            _MEMORY_CACHE[path] = {}
-            return {}
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                _MEMORY_CACHE[path] = data
-                return data
-        except json.JSONDecodeError:
-            logger.error(f"Archivo corrupto detectado: {path}. Recreando.")
-            _MEMORY_CACHE[path] = {}
-            return {}
+# Auto-inicializar al importar
+init_db()
 
-def _guardar_json(path, data):
-    _MEMORY_CACHE[path] = data
-    with _FILE_LOCKS[path]:
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            logger.error(f"Error escribiendo I/O en {os.path.basename(path)}: {e}")
+def get_conn():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 # ═══════════════════════════════════════════
-#  CONFIGURACIÓN GLOBAL
+#  CONFIGURACIÓN GLOBAL (Mantiene JSON para config.json)
 # ═══════════════════════════════════════════
 def cargar_config():
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Fallo al leer config.json: {e}")
     return {"prefijo": "g!"}
 
 def guardar_config(data):
     try:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Fallo al escribir config.json: {e}")
 
+# ═══════════════════════════════════════════
+#  CONFIGURACIÓN POR SERVIDOR (Migrado a SQLite)
+# ═══════════════════════════════════════════
 def obtener_guild_config(guild_id: int) -> dict:
-    data = _cargar_json(GUILDS_FILE)
-    gid = str(guild_id)
-    if gid not in data:
-        data[gid] = DEFAULT_GUILD_CONFIG.copy()
-        _guardar_json(GUILDS_FILE, data)
-        return data[gid]
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT config_data FROM guild_config WHERE guild_id = ?", (str(guild_id),))
+    row = cursor.fetchone()
+    conn.close()
 
-    for k, v in DEFAULT_GUILD_CONFIG.items():
-        data[gid].setdefault(k, v)
-    return data[gid]
+    config_actual = DEFAULT_GUILD_CONFIG.copy()
+    if row:
+        try:
+            db_config = json.loads(row["config_data"])
+            config_actual.update(db_config)
+        except json.JSONDecodeError:
+            pass
+    return config_actual
 
 def actualizar_guild_config(guild_id: int, clave: str, valor):
-    data = _cargar_json(GUILDS_FILE)
-    gid = str(guild_id)
-    if gid not in data:
-        data[gid] = DEFAULT_GUILD_CONFIG.copy()
-    data[gid][clave] = valor
-    _guardar_json(GUILDS_FILE, data)
+    config_actual = obtener_guild_config(guild_id)
+    config_actual[clave] = valor
+    
+    with db_lock:
+        conn = get_conn()
+        conn.execute("INSERT OR REPLACE INTO guild_config (guild_id, config_data) VALUES (?, ?)", 
+                     (str(guild_id), json.dumps(config_actual)))
+        conn.commit()
+        conn.close()
 
 # ═══════════════════════════════════════════
-#  CASES / EXPEDIENTES (REGISTROS)
+#  CASES / EXPEDIENTES (Migrado a SQLite)
 # ═══════════════════════════════════════════
-def cargar_cases(): return _cargar_json(CASES_FILE)
-def guardar_cases(data): _guardar_json(CASES_FILE, data)
+def cargar_cases():
+    """Capa de compatibilidad: Devuelve un dict con todos los casos para no romper cogs antiguos."""
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM cases")
+    rows = cursor.fetchall()
+    conn.close()
+
+    cases_dict = {}
+    for row in rows:
+        cases_dict[row["case_id"]] = {
+            "id": row["case_id"],
+            "guild_id": row["guild_id"],
+            "tipo": row["tipo"],
+            "usuario_id": row["usuario_id"],
+            "moderador_id": row["moderador_id"],
+            "razon": row["razon"],
+            "fecha": row["fecha"],
+            "extra": json.loads(row["extra"]) if row["extra"] else {}
+        }
+    return cases_dict
+
+def guardar_cases(data):
+    """Capa de compatibilidad: Sobrescribe la tabla (Usado por el comando delcase)."""
+    with db_lock:
+        conn = get_conn()
+        conn.execute("DELETE FROM cases")
+        for case_id, c in data.items():
+            conn.execute('''INSERT INTO cases (case_id, guild_id, tipo, usuario_id, moderador_id, razon, fecha, extra)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
+                         (case_id, c.get("guild_id", "global"), c.get("tipo"), c.get("usuario_id"), 
+                          c.get("moderador_id"), c.get("razon"), c.get("fecha"), json.dumps(c.get("extra", {}))))
+        conn.commit()
+        conn.close()
 
 def crear_case(*args, **kwargs):
-    cases = cargar_cases()
-    
+    # Adaptador de argumentos para mantener compatibilidad con tu código anterior
     if len(args) >= 5 and isinstance(args[4], (str, int)) and not isinstance(args[4], dict):
         guild_id, tipo, usuario_id, moderador_id, razon = args[:5]
         extra = args[5] if len(args) > 5 else kwargs.get("extra", {})
@@ -136,101 +178,107 @@ def crear_case(*args, **kwargs):
         extra = args[4] if len(args) > 4 else kwargs.get("extra", {})
         guild_id = "global"
 
-    numero = len(cases) + 1
-    case_id = f"CASE-{numero:05d}" # Actualizado a 5 dígitos para alta escalabilidad
+    fecha = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    cases[case_id] = {
-        "id": case_id,
-        "guild_id": str(guild_id),
-        "tipo": tipo,
-        "usuario_id": str(usuario_id),
-        "moderador_id": str(moderador_id),
-        "razon": razon,
-        "fecha": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-        "extra": extra
-    }
-    guardar_cases(cases)
+    with db_lock:
+        conn = get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM cases")
+        numero = cursor.fetchone()[0] + 1
+        case_id = f"CASE-{numero:05d}"
+        
+        cursor.execute('''INSERT INTO cases (case_id, guild_id, tipo, usuario_id, moderador_id, razon, fecha, extra)
+                          VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
+                       (case_id, str(guild_id), tipo, str(usuario_id), str(moderador_id), razon, fecha, json.dumps(extra)))
+        conn.commit()
+        conn.close()
+        
     return case_id
 
 def historial_usuario(*args):
-    cases = cargar_cases()
     usuario_id = str(args[-1])
-    return {k: v for k, v in cases.items() if v.get("usuario_id") == usuario_id}
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM cases WHERE usuario_id = ?", (usuario_id,))
+    rows = cursor.fetchall()
+    conn.close()
+
+    return {row["case_id"]: dict(row) for row in rows}
 
 # ═══════════════════════════════════════════
-#  ADVERTENCIAS (WARNS)
+#  ADVERTENCIAS (WARNS) (Migrado a SQLite)
 # ═══════════════════════════════════════════
-def cargar_warns(): return _cargar_json(WARNS_FILE)
-def guardar_warns(data): _guardar_json(WARNS_FILE, data)
-
 def agregar_warn(*args):
-    warns = cargar_warns()
     if len(args) == 4:
         guild_id, usuario_id, mod_id, razon = args
-        uid = f"{guild_id}_{usuario_id}"
     else:
         usuario_id, mod_id, razon = args
-        uid = str(usuario_id)
+        guild_id = "global"
 
-    if uid not in warns: warns[uid] = []
-
-    warns[uid].append({
-        "moderador_id": str(mod_id),
-        "razon": razon,
-        "fecha": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    })
-    guardar_warns(warns)
-    return len(warns[uid])
+    fecha = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    
+    with db_lock:
+        conn = get_conn()
+        conn.execute('''INSERT INTO warns (guild_id, usuario_id, moderador_id, razon, fecha)
+                        VALUES (?, ?, ?, ?, ?)''', 
+                     (str(guild_id), str(usuario_id), str(mod_id), razon, fecha))
+        conn.commit()
+        
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM warns WHERE usuario_id = ?", (str(usuario_id),))
+        total = cursor.fetchone()[0]
+        conn.close()
+        
+    return total
 
 def obtener_warns(*args):
-    warns = cargar_warns()
-    uid = str(args[-1])
-    if uid in warns: return warns[uid]
-    for k, v in warns.items():
-        if k.endswith(f"_{uid}"): return v
-    return []
+    usuario_id = str(args[-1])
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM warns WHERE usuario_id = ?", (usuario_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 def limpiar_warns(*args):
-    warns = cargar_warns()
-    uid = str(args[-1])
-    borrados = 0
-    claves_a_borrar = [k for k in warns if k == uid or k.endswith(f"_{uid}")]
-    for k in claves_a_borrar:
-        borrados += len(warns[k])
-        del warns[k]
-    guardar_warns(warns)
+    usuario_id = str(args[-1])
+    with db_lock:
+        conn = get_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM warns WHERE usuario_id = ?", (usuario_id,))
+        borrados = cursor.fetchone()[0]
+        cursor.execute("DELETE FROM warns WHERE usuario_id = ?", (usuario_id,))
+        conn.commit()
+        conn.close()
     return borrados
 
 # ═══════════════════════════════════════════
-#  NOTAS INTERNAS DEL STAFF
+#  NOTAS INTERNAS DEL STAFF (Migrado a SQLite)
 # ═══════════════════════════════════════════
-def cargar_notes(): return _cargar_json(NOTES_FILE)
-def guardar_notes(data): _guardar_json(NOTES_FILE, data)
-
 def agregar_nota(*args):
-    notes = cargar_notes()
     if len(args) == 4:
         guild_id, usuario_id, autor_id, nota = args
-        uid = f"{guild_id}_{usuario_id}"
     else:
         usuario_id, autor_id, nota = args
-        uid = str(usuario_id)
+        guild_id = "global"
 
-    if uid not in notes: notes[uid] = []
-
-    notes[uid].append({
-        "autor_id": str(autor_id),
-        "nota": nota,
-        "fecha": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    })
-    guardar_notes(notes)
+    fecha = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    
+    with db_lock:
+        conn = get_conn()
+        conn.execute('''INSERT INTO notes (guild_id, usuario_id, autor_id, nota, fecha)
+                        VALUES (?, ?, ?, ?, ?)''', 
+                     (str(guild_id), str(usuario_id), str(autor_id), nota, fecha))
+        conn.commit()
+        conn.close()
 
 def obtener_notas(*args):
-    notes = cargar_notes()
-    uid = str(args[-1])
-    if uid in notes: return notes[uid]
-    for k, v in notes.items():
-        if k.endswith(f"_{uid}"): return v
-    return []
+    usuario_id = str(args[-1])
+    conn = get_conn()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM notes WHERE usuario_id = ?", (usuario_id,))
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 obtener_notes = obtener_notas

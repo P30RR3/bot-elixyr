@@ -283,21 +283,21 @@ class AutoMod(commands.Cog):
             asyncio.create_task(self._procesar_ia_shadow_flag(message, contenido, modo))
 
     # ═════════════════════════════════════════════════════════════════════════════
-    #  MÉTODOS DE EJECUCIÓN Y TELEMETRÍA
+    #  MÉTODOS DE EJECUCIÓN Y TELEMETRÍA (REFACTORIZADOS)
     # ═════════════════════════════════════════════════════════════════════════════
     async def _ejecutar_sancion(self, message: discord.Message, razon_timeout: str, minutos: int, cat: str, sev: int, razon_log: str, borrado: bool):
-        """Ejecuta la eliminación, el timeout y el registro en un solo paso seguro."""
+        """Ejecuta la eliminación, el timeout y el registro con manejo estricto de errores."""
         ahora = datetime.now(timezone.utc)
         try:
             if borrado:
                 await message.delete()
             await message.author.timeout(ahora + timedelta(minutes=minutos), reason=f"AutoMod: {razon_timeout}")
         except discord.Forbidden:
-            pass 
+            logger.warning(f"AutoMod: Jerarquía insuficiente para sancionar a {message.author.id} en {message.guild.name}.")
         except discord.NotFound:
-            pass 
+            pass # El mensaje ya fue borrado por otro bot o el usuario
         except Exception as e:
-            print(f"[AUTOMOD ERROR] Fallo al ejecutar sanción: {e}")
+            logger.error(f"AutoMod: Fallo crítico al ejecutar sanción: {e}")
             
         self._log_incidente(message.guild, message.author, message.channel, message.content, cat, sev, razon_log, borrado)
 
@@ -310,65 +310,23 @@ class AutoMod(commands.Cog):
             razon = analisis.get("razon", "Detección preventiva")
 
             if categoria in ["TOXICO", "SPAM", "SCAM"] and severidad >= 3:
-                
                 if modo == "pacifico":
-                    # Solo observa y reporta
                     self._log_incidente(message.guild, message.author, message.channel, contenido, categoria, severidad, razon, borrado=False)
-                
                 elif modo == "intermedio":
-                    # Shadow Flagging: No borra, pero marca al usuario en secreto
                     self._log_incidente(message.guild, message.author, message.channel, contenido, categoria, severidad, razon, borrado=False)
-                
                 elif modo == "hard":
-                    # Tolerancia Cero: Borra y silencia
                     try:
                         await message.delete()
                         await message.author.timeout(datetime.now(timezone.utc) + timedelta(minutes=30), reason=f"AutoMod IA (Hard Mode): {razon}")
-                    except Exception: pass
+                    except discord.Forbidden:
+                        logger.warning(f"AutoMod IA: Sin permisos para aislar a {message.author.id}.")
+                    except Exception as e:
+                        logger.error(f"AutoMod IA: Error al aplicar Hard Mode: {e}")
+                        
                     self._log_incidente(message.guild, message.author, message.channel, contenido, categoria, severidad, razon, borrado=True)
 
         except Exception as e:
-            print(f"[IA SHADOW FLAG ERROR] {e}")
-
-    def _log_incidente(self, guild: discord.Guild, autor: discord.Member, canal: discord.TextChannel, contenido: str, cat: str, sev: int, razon: str, borrado: bool):
-        """Genera un expediente de alta costura en el canal SOC."""
-        cfg = obtener_guild_config(guild.id)
-        ch_id = cfg.get("audit_channel") or cfg.get("log_channel")
-        if not ch_id: 
-            return
-        
-        log_ch = guild.get_channel(int(ch_id))
-        if not log_ch: 
-            return
-
-        case_id = crear_case("ia_flag", autor.id, self.bot.user.id, razon, {"severidad": sev, "categoria": cat})
-        
-        estado_txt = "🗑️ Neutralizado (0ms)" if borrado else "👁️‍🗨️ Shadow Flag (Vigilancia Activa)"
-        color = 0xEF4444 if borrado else 0xF59E0B 
-
-        embed = discord.Embed(
-            title=f"🚨 ALERTA AUTOMOD ▸ {cat}",
-            description="El motor heurístico ha interceptado una anomalía en el flujo de chat.",
-            color=color,
-            timestamp=datetime.now(timezone.utc)
-        )
-        
-        embed.add_field(name="Sujeto Identificado", value=f"{autor.mention}\n`ID: {autor.id}`", inline=True)
-        embed.add_field(name="Ubicación del Incidente", value=f"{canal.mention}\n`ID: {canal.id}`", inline=True)
-        embed.add_field(name="Nivel de Amenaza", value=f"`{sev}/5`", inline=True)
-        
-        embed.add_field(name="Estado Táctico", value=f"**{estado_txt}**", inline=False)
-        embed.add_field(name="Dictamen IA / Heurístico", value=f"> *{razon}*", inline=False)
-        
-        contenido_seguro = contenido.replace("`", "'")[:900]
-        if len(contenido) > 900:
-            contenido_seguro += "..."
-            
-        embed.add_field(name="Evidencia Capturada", value=f"```text\n{contenido_seguro}\n```", inline=False)
-        embed.set_footer(text=f"Expediente #{case_id} • Elixyr SOC Sentinel", icon_url=self.bot.user.display_avatar.url)
-        
-        asyncio.create_task(log_ch.send(embed=embed))
-
+            logger.error(f"Fallo en el motor semántico IA (Shadow Flag): {e}")
     # ═════════════════════════════════════════════════════════════════════════════
     #  COMANDOS DE CONFIGURACIÓN Y CONTROL
     # ═════════════════════════════════════════════════════════════════════════════

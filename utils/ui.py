@@ -5,19 +5,19 @@ from utils.helpers import cargar_config
 CONFIG = cargar_config()
 
 # ─────────────────────────────────────────────────────────────
-#  PALETA DE COLORES DE ALTA COSTURA (HEX CODES)
+#  PALETA DE COLORES "DARK SOC" (Optimizada para Modo Oscuro)
 # ─────────────────────────────────────────────────────────────
 PALETA = {
-    "primario": CONFIG.get("color_principal", 0x7C3AED),  # Royal Amethyst
-    "exito":    CONFIG.get("color_exito", 0x10B981),      # Emerald Minimal
-    "error":    CONFIG.get("color_error", 0xEF4444),      # Crimson Rose
-    "alerta":   CONFIG.get("color_warn", 0xF59E0B),       # Amber Core
-    "info":     CONFIG.get("color_info", 0x6366F1),       # Indigo Slate
-    "oscuro":   0x1E1F22,                                 # Obsidian Jet
-    "peligro":  0xFF0000,                                 # Nuke Red
+    "primario": 0x2B2D31,  # Gris oscuro nativo de Discord (Invisible embed)
+    "exito":    0x00FF7F,  # Spring Green (Terminal)
+    "error":    0xFF3131,  # Neon Red
+    "alerta":   0xFFCC00,  # Cyber Yellow
+    "info":     0x00E5FF,  # Cyan Neon
+    "oscuro":   0x1E1F22,  # Background Discord
+    "peligro":  0xFF0000,  # Nuke Red
 }
 
-FOOTER_TEXTO = CONFIG.get("footer_texto", "Elixyr Guard • Sentinel Architecture")
+FOOTER_TEXTO = "Elixyr Guard • Advanced Security Operations"
 
 # ─────────────────────────────────────────────────────────────
 #  HERRAMIENTAS VISUALES ÚNICAS (BARRAS DE ESTADO)
@@ -27,19 +27,32 @@ def barra_riesgo(severidad: int) -> str:
     cuadros_totales = 5
     llenos = min(max(severidad, 0), cuadros_totales)
     vacios = cuadros_totales - llenos
-    barra = ("🟥" * llenos) + ("⬛" * vacios)
+    barra = ("▰" * llenos) + ("▱" * vacios)
     porcentaje = (llenos / cuadros_totales) * 100
-    return f"{barra} `[{int(porcentaje)}% Nivel de Amenaza]`"
+    return f"`[{barra}] {int(porcentaje)}% AMENAZA`"
+
+def barra_progreso(actual: int, total: int, longitud: int = 20) -> str:
+    """Genera una barra de progreso dinámica estilo terminal de carga."""
+    if total == 0: return f"`[{'▱' * longitud}] 100%`"
+    
+    porcentaje = actual / total
+    llenos = int(longitud * porcentaje)
+    vacios = longitud - llenos
+    
+    barra = ("▰" * llenos) + ("▱" * vacios)
+    porcentaje_entero = int(porcentaje * 100)
+    
+    return f"`[{barra}] {porcentaje_entero}%`"
 
 # ─────────────────────────────────────────────────────────────
 #  1. FORMATO EDITORIAL NATIVO (MODERNO Y LIMPIO)
 # ─────────────────────────────────────────────────────────────
-def formato_editorial(titulo: str, contenido: str, badge: str = "SISTEMA", pie: str = None) -> str:
-    separador = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    pie_linea = f"\n\n-# {pie}" if pie else f"\n\n-# {FOOTER_TEXTO}"
+def formato_editorial(titulo: str, contenido: str, badge: str = "SYSTEM", pie: str = None) -> str:
+    """Genera un mensaje de texto puro con estética de terminal moderna."""
+    pie_linea = f"\n\n-# 🛡️ {pie}" if pie else f"\n\n-# 🛡️ {FOOTER_TEXTO}"
     return (
-        f"# [{badge}] // {titulo.upper()}\n"
-        f"{separador}\n"
+        f"## 💻 {badge} // {titulo.upper()}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{contenido}"
         f"{pie_linea}"
     )
@@ -48,20 +61,21 @@ def formato_editorial(titulo: str, contenido: str, badge: str = "SISTEMA", pie: 
 #  2. EMBEDS DE VANGUARDIA (LOGS, TICKETS Y SANCIONES)
 # ─────────────────────────────────────────────────────────────
 def embed_base(titulo: str, descripcion: str = None, color: int = None) -> discord.Embed:
+    """Embed minimalista que se funde con el fondo de Discord."""
     embed = discord.Embed(
         title=titulo,
         description=descripcion,
         color=color or PALETA["primario"],
         timestamp=datetime.now(timezone.utc)
     )
-    embed.set_footer(text=f"{FOOTER_TEXTO} ▸ Terminal Segura")
+    embed.set_footer(text=FOOTER_TEXTO, icon_url="https://cdn.discordapp.com/emojis/1183832138484154448.webp")
     return embed
 
 def embed_exito(titulo: str, descripcion: str = None) -> discord.Embed:
-    return embed_base(f"✨ {titulo}", descripcion, PALETA["exito"])
+    return embed_base(f"✦ {titulo}", descripcion, PALETA["exito"])
 
 def embed_error(titulo: str, descripcion: str = None) -> discord.Embed:
-    return embed_base(f"❌ {titulo}", descripcion, PALETA["error"])
+    return embed_base(f"⚠️ {titulo}", descripcion, PALETA["error"])
 
 def embed_warn(titulo: str, descripcion: str = None) -> discord.Embed:
     return embed_base(f"⚠️ {titulo}", descripcion, PALETA["alerta"])
@@ -77,7 +91,7 @@ def embed_lockdown(guild_name: str, razon: str) -> discord.Embed:
         color=PALETA["peligro"],
         timestamp=datetime.now(timezone.utc)
     )
-    embed.set_thumbnail(url="https://i.imgur.com/8qGqEBy.gif") # Un gif de alerta o candado queda épico
+    embed.set_thumbnail(url="https://i.imgur.com/8qGqEBy.gif")
     embed.set_footer(text=f"{FOOTER_TEXTO} • Protocolo Anti-Nuke")
     return embed
 
@@ -93,7 +107,6 @@ def embed_sancion(tipo: str, usuario: discord.Member | discord.User, moderador: 
 
     embed = discord.Embed(title=titulo, color=color, timestamp=datetime.now(timezone.utc))
     
-    # Soporte para dict extra
     severidad_ia = extra.get("severidad", 0) if extra else 0
     if tipo == "ia_flag" or severidad_ia > 0:
         embed.description = f"**Análisis de Riesgo:**\n{barra_riesgo(severidad_ia)}"
@@ -145,7 +158,7 @@ class ConfirmView(discord.ui.View):
 async def enviar_log(bot, guild: discord.Guild, contenido):
     """Canaliza los logs al canal configurado sin interrumpir otros procesos."""
     try:
-        config = cargar_config() # Leer DB general
+        config = cargar_config()
         ch_id = config.get("audit_channel") or config.get("log_channel")
         if not ch_id or not guild: return
         canal = guild.get_channel(int(ch_id))

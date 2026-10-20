@@ -1,10 +1,8 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-from utils.ia import preguntar_ia
+from utils.ia import preguntar_ia, extraer_json
 import asyncio
-import json
-import re
 
 class Canales(commands.Cog):
     """Control de infraestructura, contención perimetral y despliegue asistido por IA."""
@@ -44,11 +42,10 @@ Devuelve SOLO este JSON:
 
         respuesta = await preguntar_ia(prompt, json_mode=True, system_prompt=sys_prompt)
 
-        try:
-            match = re.search(r"\{.*\}", respuesta, re.DOTALL)
-            data = json.loads(match.group(0)) if match else json.loads(respuesta)
-        except Exception as e:
-            return await msg_wait.edit(content=f"⚠️ **Error al procesar la respuesta de la IA:** `{e}`")
+        # Extracción segura y blindada
+        data = extraer_json(respuesta)
+        if not data:
+            return await msg_wait.edit(content="⚠️ **Error Crítico:** La IA devolvió un formato corrupto. Operación abortada.")
 
         nombre_canal = str(data.get("nombre", "canal-nuevo")).lower().replace(" ", "-")[:90]
         tipo = str(data.get("tipo", "texto")).lower()
@@ -223,7 +220,6 @@ Devuelve SOLO este JSON:
         await ctx.channel.edit(slowmode_delay=segundos)
         msg = "✦ Modo lento desactivado." if segundos == 0 else f"✦ Modo lento establecido en `{segundos}s`."
         await ctx.send(msg)
-
 
 async def setup(bot):
     await bot.add_cog(Canales(bot))

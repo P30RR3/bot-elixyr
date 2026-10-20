@@ -1,10 +1,9 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-from utils.ia import preguntar_ia
+from utils.ia import preguntar_ia, extraer_json
+from utils.ui import barra_progreso, formato_editorial
 import asyncio
-import re
-import json
 
 # Paleta de colores comunes en español para mapeo directo
 COLORES_NATIVOS = {
@@ -35,7 +34,6 @@ def resolver_color(color_texto: str) -> discord.Color | None:
         return discord.Color(int(texto_limpio, 16))
     except ValueError:
         return None
-
 
 class Roles(commands.Cog):
     """Gestión de credenciales, contención táctica y creación asistida por IA."""
@@ -87,11 +85,10 @@ Devuelve SOLO este JSON:
 
         respuesta = await preguntar_ia(prompt, json_mode=True, system_prompt=sys_prompt)
 
-        try:
-            match = re.search(r"\{.*\}", respuesta, re.DOTALL)
-            data = json.loads(match.group(0)) if match else json.loads(respuesta)
-        except Exception as e:
-            return await msg_wait.edit(content=f"⚠️ **Error al procesar dictamen de la IA:** `{e}`")
+        # Usamos el extractor blindado en lugar de confiar ciegamente
+        data = extraer_json(respuesta)
+        if not data:
+            return await msg_wait.edit(content="⚠️ **Error Crítico:** La IA devolvió un formato corrupto o incomprensible. Operación abortada.")
 
         nombre_final = (nombre or data.get("nombre", "Rol Personalizado"))[:100]
 
@@ -219,49 +216,103 @@ Devuelve SOLO este JSON:
                 pass
 
     # ═════════════════════════════════════════════════════════════
-    #  4. ASIGNACIONES MASIVAS (ROLE-ALL / ROLE-BOTS)
+    #  4. ASIGNACIONES MASIVAS (LIVE LOADING TERMINAL)
     # ═════════════════════════════════════════════════════════════
-    @commands.hybrid_command(name="role-all", description="Otorga un rol a todos los miembros humanos del servidor")
-    @app_commands.describe(rol="Rol a asignar")
+    @commands.hybrid_command(name="role-all", description="Otorga un rol a todos los miembros humanos con barra de progreso en vivo")
+    @app_commands.describe(rol="Rol a asignar masivamente")
     @commands.has_permissions(administrator=True)
     async def role_all(self, ctx, rol: discord.Role):
         await ctx.defer()
+        
         if rol >= ctx.guild.me.top_role or rol >= ctx.author.top_role:
-            return await ctx.send("⛔ Jerarquía insuficiente para manipular este rol.")
+            return await ctx.send("⛔ **Jerarquía Insuficiente:** No tengo permisos para manipular este rol o es superior al tuyo.")
 
         humanos = [m for m in ctx.guild.members if not m.bot and rol not in m.roles]
-        if not humanos:
-            return await ctx.send(f"✦ Todos los miembros humanos ya tienen el rol {rol.mention}.")
+        total = len(humanos)
+        
+        if total == 0:
+            return await ctx.send(f"✦ Todos los miembros humanos ya poseen la credencial {rol.mention}.")
 
-        msg = await ctx.send(f"⏳ *Asignando {rol.mention} a `{len(humanos)}` usuarios en lotes seguros...*")
+        # ─── RENDERIZADO INICIAL DEL PANEL ───
+        def generar_panel(actual, asignados, fallos, completado=False):
+            estado = "✅ **OPERACIÓN FINALIZADA**" if completado else "⏳ *Inyectando credenciales en la red...*"
+            contenido = (
+                f"> **Objetivo:** {rol.mention}\n"
+                f"> **Población Objetivo:** `{total}` usuarios\n"
+                f"> **Estado:** {estado}\n\n"
+                f"{barra_progreso(actual, total)}\n"
+                f"▸ **Completados:** `{asignados}` | **Fallos:** `{fallos}`"
+            )
+            return formato_editorial("DESPLIEGUE MASIVO DE CREDENCIALES", contenido, badge="SYSTEM")
+
+        msg = await ctx.send(generar_panel(0, 0, 0))
+
         asignados = 0
-        for m in humanos:
+        fallos = 0
+
+        # ─── BUCLE DE INYECCIÓN CON RATE LIMIT PROTECTION ───
+        for i, miembro in enumerate(humanos, 1):
             try:
-                await m.add_roles(rol, reason=f"Role-All ejecutado por {ctx.author}")
+                await miembro.add_roles(rol, reason=f"Role-All ejecutado por {ctx.author}")
                 asignados += 1
-                await asyncio.sleep(0.8)
             except Exception:
-                pass
+                fallos += 1
+            
+            # Actualizamos la pantalla cada 4 usuarios o si es el último
+            if i % 4 == 0 or i == total:
+                try:
+                    await msg.edit(content=generar_panel(i, asignados, fallos, completado=(i == total)))
+                except Exception:
+                    pass 
+            
+            # Pausa táctica para no saturar la API de Discord
+            await asyncio.sleep(1.2)
 
-        await msg.edit(content=f"✦ **[OPERACIÓN MASIVA COMPLETADA]** Rol {rol.mention} asignado a `{asignados}` miembros.")
-
-    @commands.hybrid_command(name="role-bots", description="Otorga un rol a todos los bots del servidor")
+    @commands.hybrid_command(name="role-bots", description="Otorga un rol a todos los bots con barra de progreso en vivo")
     @app_commands.describe(rol="Rol para los bots")
     @commands.has_permissions(administrator=True)
     async def role_bots(self, ctx, rol: discord.Role):
         await ctx.defer()
+        
         if rol >= ctx.guild.me.top_role:
-            return await ctx.send("⛔ Jerarquía insuficiente.")
+            return await ctx.send("⛔ **Jerarquía Insuficiente.**")
 
         bots = [m for m in ctx.guild.members if m.bot and rol not in m.roles]
-        for b in bots:
+        total = len(bots)
+        
+        if total == 0:
+            return await ctx.send(f"✦ Todos los bots ya poseen la credencial {rol.mention}.")
+
+        def generar_panel(actual, asignados, fallos, completado=False):
+            estado = "✅ **OPERACIÓN FINALIZADA**" if completado else "⚙️ *Sincronizando inteligencias artificiales...*"
+            contenido = (
+                f"> **Objetivo:** {rol.mention}\n"
+                f"> **Población Bot:** `{total}` entidades\n"
+                f"> **Estado:** {estado}\n\n"
+                f"{barra_progreso(actual, total)}\n"
+                f"▸ **Sincronizados:** `{asignados}` | **Fallos:** `{fallos}`"
+            )
+            return formato_editorial("ACTUALIZACIÓN DE SISTEMAS (BOTS)", contenido, badge="SYSTEM")
+
+        msg = await ctx.send(generar_panel(0, 0, 0))
+
+        asignados = 0
+        fallos = 0
+
+        for i, b in enumerate(bots, 1):
             try:
                 await b.add_roles(rol, reason=f"Role-Bots por {ctx.author}")
-                await asyncio.sleep(0.5)
+                asignados += 1
             except Exception:
-                pass
-
-        await ctx.send(f"✦ Rol {rol.mention} concedido a `{len(bots)}` bots del servidor.")
+                fallos += 1
+            
+            if i % 3 == 0 or i == total:
+                try:
+                    await msg.edit(content=generar_panel(i, asignados, fallos, completado=(i == total)))
+                except Exception:
+                    pass
+            
+            await asyncio.sleep(1.2)
 
     # ═════════════════════════════════════════════════════════════
     #  5. GESTIÓN MANUAL DE CREDENCIALES
@@ -285,7 +336,6 @@ Devuelve SOLO este JSON:
             return await ctx.send("⛔ Rango insuficiente.")
         await usuario.remove_roles(rol, reason=f"Removido por {ctx.author}")
         await ctx.send(f"✦ Credencial {rol.mention} revocada de {usuario.mention}.")
-
 
 async def setup(bot):
     await bot.add_cog(Roles(bot))
