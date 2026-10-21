@@ -1,39 +1,36 @@
+"""
+═══════════════════════════════════════════════════════════════════════════════
+  ELIXYR GUARD // CREDENTIAL FORGING & ROLE OPERATIONS (NEW GEN v6.0)
+  Capacidades: Role-Create con IA (LiveAction), Cuarentena Táctica Strip-Roles,
+               Asignación Masiva con Barra de Carga Dinámica y Temp-Roles
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
 import discord
 from discord.ext import commands
 from discord import app_commands
-from utils.ia import preguntar_ia, extraer_json
-from utils.ui import barra_progreso, formato_editorial
 import asyncio
+from utils.ia import preguntar_ia, extraer_json
+from utils.helpers import crear_case
+from utils.ui import formato_editorial, LiveActionController
 
-# Paleta de colores comunes en español para mapeo directo
 COLORES_NATIVOS = {
-    "rojo": discord.Color.red(),
-    "azul": discord.Color.blue(),
-    "verde": discord.Color.green(),
-    "amarillo": discord.Color.gold(),
-    "naranja": discord.Color.orange(),
-    "morado": discord.Color.purple(),
-    "purpura": discord.Color.purple(),
-    "rosa": discord.Color.from_rgb(255, 105, 180),
-    "cyan": discord.Color.teal(),
-    "turquesa": discord.Color.teal(),
-    "blanco": discord.Color.from_rgb(250, 250, 250),
-    "negro": discord.Color.from_rgb(20, 20, 20),
-    "gris": discord.Color.light_grey(),
-    "oscuro": discord.Color.dark_grey(),
+    "rojo": discord.Color.red(), "azul": discord.Color.blue(), "verde": discord.Color.green(),
+    "amarillo": discord.Color.gold(), "naranja": discord.Color.orange(), "morado": discord.Color.purple(),
+    "rosa": discord.Color.from_rgb(255, 105, 180), "cyan": discord.Color.teal(),
+    "blanco": discord.Color.from_rgb(250, 250, 250), "negro": discord.Color.from_rgb(20, 20, 20)
 }
 
-def resolver_color(color_texto: str) -> discord.Color | None:
-    """Convierte texto en español o código Hex en un discord.Color válido."""
-    if not color_texto:
-        return None
-    texto_limpio = color_texto.strip().lower().replace("#", "")
-    if texto_limpio in COLORES_NATIVOS:
-        return COLORES_NATIVOS[texto_limpio]
+def resolver_color(txt: str) -> discord.Color:
+    if not txt:
+        return discord.Color.default()
+    limpio = txt.strip().lower().replace("#", "")
+    if limpio in COLORES_NATIVOS:
+        return COLORES_NATIVOS[limpio]
     try:
-        return discord.Color(int(texto_limpio, 16))
+        return discord.Color(int(limpio, 16))
     except ValueError:
-        return None
+        return discord.Color.default()
 
 class Roles(commands.Cog):
     """Gestión de credenciales, contención táctica y creación asistida por IA."""
@@ -41,38 +38,39 @@ class Roles(commands.Cog):
         self.bot = bot
 
     # ═════════════════════════════════════════════════════════════
-    #  1. CREACIÓN QUIRÚRGICA DE ROLES CON IA
+    #  1. CREACIÓN QUIRÚRGICA DE ROLES CON IA (LIVE-ACTION)
     # ═════════════════════════════════════════════════════════════
     @commands.hybrid_command(
         name="role-create-ia",
-        description="Crea un rol configurando permisos, color y jerarquía con Cerebras AI"
+        description="Diseña un rol configurando su matriz de permisos y color mediante Cerebras AI"
     )
     @app_commands.describe(
-        descripcion="Explica qué hará el rol (ej: mod que solo borre mensajes y mutee, sin banear)",
-        nombre="Opcional: Nombre exacto para el rol",
-        color="Opcional: Código Hex (#FF0055) o color en español (rojo, azul, morado...)"
+        descripcion="Explica qué funciones tendrá el rol",
+        nombre="Nombre opcional para el rol",
+        color="Color en español o código HEX (#FF0055)"
     )
     @commands.has_permissions(manage_roles=True)
+    @commands.bot_has_permissions(manage_roles=True)
     async def role_create_ia(self, ctx, descripcion: str, nombre: str = None, color: str = None):
         await ctx.defer()
-        msg_wait = await ctx.send("🧠 *Analizando directivas y calculando matriz de permisos...*")
 
-        # Lista de permisos reales que soporta discord.py
+        live = LiveActionController(ctx, "Forja de Credenciales // AI Role Engine", total_pasos=3)
+        await live.iniciar()
+
+        await live.actualizar("Analizando privilegios requeridos y directivas de seguridad...", exito=True)
+
         permisos_validos = [p for p, _ in discord.Permissions.none()]
-
-        sys_prompt = "Eres un arquitecto de seguridad y permisos de Discord. Responde ÚNICAMENTE con un JSON válido."
-
-        prompt = f"""El usuario necesita un rol con este propósito:
+        prompt = f"""El administrador necesita un rol con este propósito:
 "{descripcion}"
-Nombre sugerido: {"Ninguno (invéntalo acorde)" if not nombre else nombre}
+Nombre sugerido: {nombre or 'Ninguno (elige uno profesional)'}
 
-Permisos permitidos en discord.py:
+Permisos reconocidos por discord.py:
 {permisos_validos}
 
-Directrices obligatorias:
-1. Analiza qué permisos necesita estrictamente para cumplir su función.
-2. NO asignes administrator a menos que sea explícitamente requerido.
-3. Si el rol es puramente cosmético o de nivel, devuelve permisos vacíos [].
+Reglas:
+1. Concede estrictamente los permisos necesarios para la tarea.
+2. NUNCA asignes 'administrator' a menos que se exija explícitamente.
+3. Si el rol es cosmético o de nivel, devuelve permisos vacíos [].
 
 Devuelve SOLO este JSON:
 {{
@@ -80,47 +78,36 @@ Devuelve SOLO este JSON:
   "color": "#HEX",
   "separado": true/false,
   "mencionable": true/false,
-  "permisos": ["permiso_1", "permiso_2"]
+  "permisos": ["permiso1", "permiso2"]
 }}"""
 
-        respuesta = await preguntar_ia(prompt, json_mode=True, system_prompt=sys_prompt)
+        await live.actualizar("Calculando matriz de privilegios con Cerebras AI...", exito=True)
+        raw_ia = await preguntar_ia(prompt, json_mode=True, max_tokens=250)
+        data = extraer_json(raw_ia)
 
-        # Usamos el extractor blindado en lugar de confiar ciegamente
-        data = extraer_json(respuesta)
         if not data:
-            return await msg_wait.edit(content="⚠️ **Error Crítico:** La IA devolvió un formato corrupto o incomprensible. Operación abortada.")
+            await live.finalizar("La IA no devolvió una matriz de permisos válida.", error=True)
+            return
 
         nombre_final = (nombre or data.get("nombre", "Rol Personalizado"))[:100]
+        color_final = resolver_color(color or data.get("color", "#5865F2"))
 
-        # ─── Resolver Color (Prioridad: Usuario > IA > Default) ───
-        color_final = resolver_color(color)
-        if not color_final:
-            color_hex_ia = str(data.get("color", "#5865F2")).replace("#", "").strip()
-            try:
-                color_final = discord.Color(int(color_hex_ia, 16))
-            except ValueError:
-                color_final = discord.Color.default()
-
-        # ─── Auditoría y Asignación de Permisos ───
+        # Auditar permisos contra la jerarquía del bot
         perms = discord.Permissions.none()
-        permisos_concedidos = []
-        permisos_rechazados = []
-
         bot_perms = ctx.guild.me.guild_permissions
-        es_bot_admin = bot_perms.administrator
+        concedidos, rechazados = [], []
 
         for p in data.get("permisos", []):
             p_clean = str(p).strip().lower()
             if hasattr(perms, p_clean):
-                # Discord rechaza crear roles con permisos superiores a los del propio bot
-                tiene_el_bot = getattr(bot_perms, p_clean, False) or es_bot_admin
-                if tiene_el_bot:
+                if getattr(bot_perms, p_clean, False) or bot_perms.administrator:
                     setattr(perms, p_clean, True)
-                    permisos_concedidos.append(p_clean)
+                    concedidos.append(p_clean)
                 else:
-                    permisos_rechazados.append(p_clean)
+                    rechazados.append(p_clean)
 
-        # ─── Creación del Rol en Discord ───
+        await live.actualizar(f"Inyectando credencial '{nombre_final}' en la jerarquía...", exito=True)
+
         try:
             nuevo_rol = await ctx.guild.create_role(
                 name=nombre_final,
@@ -128,214 +115,147 @@ Devuelve SOLO este JSON:
                 permissions=perms,
                 hoist=bool(data.get("separado", True)),
                 mentionable=bool(data.get("mencionable", False)),
-                reason=f"Role IA creado por {ctx.author}: {descripcion[:100]}"
+                reason=f"Role IA por {ctx.author}: {descripcion[:60]}"
             )
-        except discord.Forbidden:
-            return await msg_wait.edit(content="⛔ **Error de Jerarquía:** No tengo permisos para gestionar roles con ese nivel de privilegios.")
-        except Exception as err:
-            return await msg_wait.edit(content=f"⚠️ **Fallo al forjar el rol:** `{err}`")
+            await live.finalizar(f"Credencial {nuevo_rol.name} forjada exitosamente.", error=False)
 
-        perms_txt = ", ".join(f"`{p}`" for p in permisos_concedidos) if permisos_concedidos else "*Ninguno (Rol estándar / Cosmético)*"
-        aviso_rechazo = f"\n> ⚠️ *Permisos omitidos por jerarquía del bot:* {', '.join(f'`{p}`' for p in permisos_rechazados)}" if permisos_rechazados else ""
+            perms_txt = ", ".join(f"`{p}`" for p in concedidos) if concedidos else "*Sin permisos elevados (Cosmético)*"
+            aviso_rechazos = f"\n> ⚠️ *Permisos omitidos por superar mi jerarquía:* {', '.join(f'`{p}`' for p in rechazados)}" if rechazados else ""
 
-        panel = (
-            f"### 🛡️ CREDENCIAL FORJADA POR IA // {nuevo_rol.mention}\n"
-            f"✦ ────────────────────────────────────────── ✦\n"
-            f"> **Identificador:** `{nuevo_rol.name}`\n"
-            f"> **Color Asignado:** `#{nuevo_rol.color.value:06X}`\n"
-            f"> **Lista Separada (Hoist):** `{'Activo 🟢' if nuevo_rol.hoist else 'Inactivo ⚪'}`\n"
-            f"> **Mencionable:** `{'Sí' if nuevo_rol.mentionable else 'No'}`\n\n"
-            f"**Permisos autorizados:**\n"
-            f"> {perms_txt}{aviso_rechazo}\n"
-            f"✦ ────────────────────────────────────────── ✦\n"
-            f"-# Optimizado y creado con Cerebras AI."
-        )
-        await msg_wait.edit(content=panel)
+            cuerpo = (
+                f"> **Credencial:** {nuevo_rol.mention} (`{nuevo_rol.name}`)\n"
+                f"> **Color:** `#{nuevo_rol.color.value:06X}` | **Lista Separada:** `{'Sí' if nuevo_rol.hoist else 'No'}`\n\n"
+                f"**Privilegios Asignados:**\n"
+                f"> {perms_txt}{aviso_rechazos}\n\n"
+                f"-# Forjado y auditado mediante Cerebras Cognitive Engine."
+            )
+            await ctx.channel.send(formato_editorial("CREDENCIAL FORJADA POR IA", cuerpo, badge="ROLE-FORGE"))
+
+        except Exception as e:
+            await live.finalizar(f"Fallo al forjar el rol: {e}", error=True)
 
     # ═════════════════════════════════════════════════════════════
     #  2. PROTOCOLO DE CUARENTENA (STRIP-ROLES)
     # ═════════════════════════════════════════════════════════════
-    @commands.hybrid_command(name="strip-roles", description="🚨 Despoja todos los roles a un usuario (Aislamiento de cuenta comprometida)")
-    @app_commands.describe(usuario="Miembro a poner en cuarentena")
+    @commands.hybrid_command(name="strip-roles", description="🚨 Despoja de todos sus roles a un usuario (Aislamiento de cuenta comprometida)")
+    @app_commands.describe(usuario="Miembro a poner en cuarentena inmediata")
     @commands.has_permissions(administrator=True)
+    @commands.bot_has_permissions(manage_roles=True)
     async def strip_roles(self, ctx, usuario: discord.Member):
         await ctx.defer()
         if usuario.id == ctx.guild.owner_id:
-            return await ctx.send("⛔ Imposible aislar al propietario de la infraestructura.")
+            return await ctx.send("⛔ Imposible aislar al dueño de la infraestructura.", ephemeral=True)
         if usuario.top_role >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
-            return await ctx.send("⛔ **Jerarquía insuficiente:** El objetivo tiene un rol igual o superior al tuyo.")
+            return await ctx.send("⛔ Jerarquía insuficiente: El objetivo tiene un rol superior o igual al tuyo.", ephemeral=True)
 
         roles_remover = [r for r in usuario.roles if r.name != "@everyone" and not r.managed and r < ctx.guild.me.top_role]
         if not roles_remover:
-            return await ctx.send(f"⚠️ {usuario.mention} no tiene roles removibles.")
+            return await ctx.send(f"⚠️ {usuario.mention} no tiene roles que puedan ser revocados por mi nivel de acceso.", ephemeral=True)
 
         try:
             await usuario.remove_roles(*roles_remover, reason=f"Protocolo de Cuarentena ejecutado por {ctx.author}")
         except Exception as e:
-            return await ctx.send(f"⚠️ Error de jerarquía: `{e}`")
+            return await ctx.send(f"❌ Error al revocar privilegios: `{e}`", ephemeral=True)
 
-        prompt = (
-            f"Alerta de Seguridad: Se ejecutó STRIP-ROLES sobre '{usuario.name}'. Se le retiraron {len(roles_remover)} roles de golpe. "
-            f"Redacta un memorando de cuarentena formal de 2 líneas indicando que la cuenta ha sido aislada."
-        )
-        dictamen = await preguntar_ia(prompt)
+        case_id = crear_case("strip-roles", usuario.id, ctx.author.id, "Cuarentena preventiva por sospecha de sabotaje", {"removidos": len(roles_remover)})
 
-        panel = (
-            f"# ☣️ CUARENTENA TÁCTICA // PRIVILEGIOS REVOCADOS\n"
-            f"✦ ────────────────────────────────────────── ✦\n"
+        cuerpo = (
             f"> **Sujeto Aislado:** {usuario.mention} (`{usuario.id}`)\n"
-            f"> **Roles Despojados:** `{len(roles_remover)}` credenciales revocadas.\n"
-            f"> **Oficial:** {ctx.author.mention}\n\n"
-            f"**🧠 Dictamen Forense:**\n"
-            f"> *{dictamen}*\n"
-            f"✦ ────────────────────────────────────────── ✦"
+            f"> **Credenciales Revocadas:** `{len(roles_remover)}` roles despojados\n"
+            f"> **Oficial:** {ctx.author.mention} | **Expediente:** `#{case_id}`\n\n"
+            f"**Estado de Seguridad:** La cuenta ha sido despojada de accesos administrativos y canalizada al área de contención."
         )
-        await ctx.send(panel)
+        await ctx.send(formato_editorial("CUARENTENA PREVENTIVA // STRIP-ROLES", cuerpo, badge="PANIC-SECURITY"))
 
     # ═════════════════════════════════════════════════════════════
-    #  3. ROL TEMPORAL (TEMP-ROLE)
+    #  3. ASIGNACIONES MASIVAS CON BARRA EN VIVO (ROLE-ALL / ROLE-BOTS)
     # ═════════════════════════════════════════════════════════════
-    @commands.hybrid_command(name="temp-role", description="Asigna un rol por una cantidad fija de minutos")
-    @app_commands.describe(usuario="Destinatario", rol="Rol temporal", minutos="Minutos de duración")
-    @commands.has_permissions(manage_roles=True)
-    async def temp_role(self, ctx, usuario: discord.Member, rol: discord.Role, minutos: int):
-        await ctx.defer()
-        if rol >= ctx.guild.me.top_role or rol >= ctx.author.top_role:
-            return await ctx.send("⛔ Jerarquía insuficiente para otorgar este rol.")
-        if minutos <= 0:
-            return await ctx.send("⚠️ Los minutos deben ser mayores a 0.")
-
-        await usuario.add_roles(rol, reason=f"Temp-Role por {ctx.author} ({minutos}m)")
-        await ctx.send(f"✦ Rol {rol.mention} concedido a {usuario.mention} por `{minutos} minutos`.")
-
-        await asyncio.sleep(minutos * 60)
-        if rol in usuario.roles:
-            try:
-                await usuario.remove_roles(rol, reason="Expiración de Temp-Role")
-            except Exception:
-                pass
-
-    # ═════════════════════════════════════════════════════════════
-    #  4. ASIGNACIONES MASIVAS (LIVE LOADING TERMINAL)
-    # ═════════════════════════════════════════════════════════════
-    @commands.hybrid_command(name="role-all", description="Otorga un rol a todos los miembros humanos con barra de progreso en vivo")
+    @commands.hybrid_command(name="role-all", description="Otorga un rol a todos los humanos con seguimiento en vivo")
     @app_commands.describe(rol="Rol a asignar masivamente")
     @commands.has_permissions(administrator=True)
+    @commands.bot_has_permissions(manage_roles=True)
     async def role_all(self, ctx, rol: discord.Role):
         await ctx.defer()
-        
         if rol >= ctx.guild.me.top_role or rol >= ctx.author.top_role:
-            return await ctx.send("⛔ **Jerarquía Insuficiente:** No tengo permisos para manipular este rol o es superior al tuyo.")
+            return await ctx.send("⛔ Jerarquía insuficiente sobre el rol seleccionado.", ephemeral=True)
 
         humanos = [m for m in ctx.guild.members if not m.bot and rol not in m.roles]
         total = len(humanos)
-        
         if total == 0:
-            return await ctx.send(f"✦ Todos los miembros humanos ya poseen la credencial {rol.mention}.")
+            return await ctx.send(f"✦ Todos los miembros humanos ya cuentan con la credencial {rol.mention}.")
 
-        # ─── RENDERIZADO INICIAL DEL PANEL ───
-        def generar_panel(actual, asignados, fallos, completado=False):
-            estado = "✅ **OPERACIÓN FINALIZADA**" if completado else "⏳ *Inyectando credenciales en la red...*"
-            contenido = (
-                f"> **Objetivo:** {rol.mention}\n"
-                f"> **Población Objetivo:** `{total}` usuarios\n"
-                f"> **Estado:** {estado}\n\n"
-                f"{barra_progreso(actual, total)}\n"
-                f"▸ **Completados:** `{asignados}` | **Fallos:** `{fallos}`"
-            )
-            return formato_editorial("DESPLIEGUE MASIVO DE CREDENCIALES", contenido, badge="SYSTEM")
+        live = LiveActionController(ctx, f"Asignación Masiva // {rol.name}", total_pasos=total)
+        await live.iniciar()
 
-        msg = await ctx.send(generar_panel(0, 0, 0))
-
-        asignados = 0
-        fallos = 0
-
-        # ─── BUCLE DE INYECCIÓN CON RATE LIMIT PROTECTION ───
-        for i, miembro in enumerate(humanos, 1):
+        asignados, fallos = 0, 0
+        for i, m in enumerate(humanos, 1):
             try:
-                await miembro.add_roles(rol, reason=f"Role-All ejecutado por {ctx.author}")
+                await m.add_roles(rol, reason=f"Role-All por {ctx.author}")
                 asignados += 1
             except Exception:
                 fallos += 1
-            
-            # Actualizamos la pantalla cada 4 usuarios o si es el último
-            if i % 4 == 0 or i == total:
-                try:
-                    await msg.edit(content=generar_panel(i, asignados, fallos, completado=(i == total)))
-                except Exception:
-                    pass 
-            
-            # Pausa táctica para no saturar la API de Discord
-            await asyncio.sleep(1.2)
 
-    @commands.hybrid_command(name="role-bots", description="Otorga un rol a todos los bots con barra de progreso en vivo")
+            if i % 4 == 0 or i == total:
+                await live.actualizar(f"Inyectando credencial a {m.display_name} (Éxitos: {asignados} | Fallos: {fallos})...", exito=True)
+                await asyncio.sleep(1.0)
+
+        await live.finalizar(f"Despliegue finalizado: {asignados} asignados, {fallos} fallos.", error=(fallos > asignados))
+
+    @commands.hybrid_command(name="role-bots", description="Otorga un rol a todos los bots del servidor")
     @app_commands.describe(rol="Rol para los bots")
     @commands.has_permissions(administrator=True)
+    @commands.bot_has_permissions(manage_roles=True)
     async def role_bots(self, ctx, rol: discord.Role):
         await ctx.defer()
-        
         if rol >= ctx.guild.me.top_role:
-            return await ctx.send("⛔ **Jerarquía Insuficiente.**")
+            return await ctx.send("⛔ Jerarquía insuficiente sobre el rol seleccionado.", ephemeral=True)
 
         bots = [m for m in ctx.guild.members if m.bot and rol not in m.roles]
         total = len(bots)
-        
         if total == 0:
-            return await ctx.send(f"✦ Todos los bots ya poseen la credencial {rol.mention}.")
+            return await ctx.send(f"✦ Todos los bots ya cuentan con la credencial {rol.mention}.")
 
-        def generar_panel(actual, asignados, fallos, completado=False):
-            estado = "✅ **OPERACIÓN FINALIZADA**" if completado else "⚙️ *Sincronizando inteligencias artificiales...*"
-            contenido = (
-                f"> **Objetivo:** {rol.mention}\n"
-                f"> **Población Bot:** `{total}` entidades\n"
-                f"> **Estado:** {estado}\n\n"
-                f"{barra_progreso(actual, total)}\n"
-                f"▸ **Sincronizados:** `{asignados}` | **Fallos:** `{fallos}`"
-            )
-            return formato_editorial("ACTUALIZACIÓN DE SISTEMAS (BOTS)", contenido, badge="SYSTEM")
+        live = LiveActionController(ctx, f"Sincronización Bots // {rol.name}", total_pasos=total)
+        await live.iniciar()
 
-        msg = await ctx.send(generar_panel(0, 0, 0))
-
-        asignados = 0
-        fallos = 0
-
+        asignados, fallos = 0, 0
         for i, b in enumerate(bots, 1):
             try:
                 await b.add_roles(rol, reason=f"Role-Bots por {ctx.author}")
                 asignados += 1
             except Exception:
                 fallos += 1
-            
+
             if i % 3 == 0 or i == total:
-                try:
-                    await msg.edit(content=generar_panel(i, asignados, fallos, completado=(i == total)))
-                except Exception:
-                    pass
-            
-            await asyncio.sleep(1.2)
+                await live.actualizar(f"Sincronizando bot {b.name} (Éxitos: {asignados} | Fallos: {fallos})...", exito=True)
+                await asyncio.sleep(1.0)
+
+        await live.finalizar(f"Sincronización completada: {asignados} bots actualizados.", error=False)
 
     # ═════════════════════════════════════════════════════════════
-    #  5. GESTIÓN MANUAL DE CREDENCIALES
+    #  4. GESTIÓN MANUAL Y ROL TEMPORAL (TEMP-ROLE)
     # ═════════════════════════════════════════════════════════════
-    @commands.hybrid_command(name="role-add", description="Asigna un rol a un usuario manualmente")
-    @app_commands.describe(usuario="Destinatario", rol="Rol")
+    @commands.hybrid_command(name="temp-role", description="Asigna un rol de forma provisional por una cantidad de minutos")
+    @app_commands.describe(usuario="Miembro objetivo", rol="Rol temporal", minutos="Duración en minutos")
     @commands.has_permissions(manage_roles=True)
-    async def role_add(self, ctx, usuario: discord.Member, rol: discord.Role):
+    @commands.bot_has_permissions(manage_roles=True)
+    async def temp_role(self, ctx, usuario: discord.Member, rol: discord.Role, minutos: int):
         await ctx.defer()
-        if rol >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
-            return await ctx.send("⛔ Rango insuficiente.")
-        await usuario.add_roles(rol, reason=f"Asignado por {ctx.author}")
-        await ctx.send(f"✦ Credencial {rol.mention} otorgada a {usuario.mention}.")
+        if rol >= ctx.guild.me.top_role or rol >= ctx.author.top_role:
+            return await ctx.send("⛔ Jerarquía insuficiente para manipular esta credencial.", ephemeral=True)
+        if minutos <= 0:
+            return await ctx.send("⚠️ La duración debe ser mayor a 0 minutos.", ephemeral=True)
 
-    @commands.hybrid_command(name="role-remove", description="Remueve un rol de un usuario manualmente")
-    @app_commands.describe(usuario="Destinatario", rol="Rol")
-    @commands.has_permissions(manage_roles=True)
-    async def role_remove(self, ctx, usuario: discord.Member, rol: discord.Role):
-        await ctx.defer()
-        if rol >= ctx.author.top_role and ctx.author.id != ctx.guild.owner_id:
-            return await ctx.send("⛔ Rango insuficiente.")
-        await usuario.remove_roles(rol, reason=f"Removido por {ctx.author}")
-        await ctx.send(f"✦ Credencial {rol.mention} revocada de {usuario.mention}.")
+        await usuario.add_roles(rol, reason=f"Temp-Role ({minutos}m) por {ctx.author}")
+        await ctx.send(f"✦ Credencial {rol.mention} concedida a {usuario.mention} por `{minutos} minutos`.")
+
+        await asyncio.sleep(minutos * 60)
+        if rol in usuario.roles:
+            try:
+                await usuario.remove_roles(rol, reason="Expiración programada de Temp-Role")
+            except Exception:
+                pass
+
 
 async def setup(bot):
     await bot.add_cog(Roles(bot))

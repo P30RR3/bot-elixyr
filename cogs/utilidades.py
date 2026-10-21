@@ -1,23 +1,53 @@
+"""
+═══════════════════════════════════════════════════════════════════════════════
+  ELIXYR GUARD // ADVANCED UTILITIES & EDITORIAL TOOLS (NEW GEN v6.0)
+  Capacidades: Redacción Editorial con IA (LiveAction), Encuestas Dinámicas,
+               Radar Snipe con Memoria Protegida y Tabla de Rendimiento Staff
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
 import discord
 from discord.ext import commands
 from discord import app_commands
 import asyncio
+import inspect
 from datetime import datetime, timezone
-from utils.helpers import cargar_config, cargar_cases
+from collections import OrderedDict
+from utils.helpers import cargar_cases
 from utils.ia import preguntar_ia
+from utils.ui import formato_editorial, barra_progreso, LiveActionController
 
-CONFIG = cargar_config()
-SNIPE_CACHE = {}
+# Snipe Cache con desalojo acotado para prevenir consumo indebido de RAM
+MAX_SNIPE_CANALES = 100
+SNIPE_BUFFER = OrderedDict()
 
+async def _ejecutar_helper(func, *args, **kwargs):
+    res = func(*args, **kwargs)
+    if inspect.isawaitable(res):
+        return await res
+    return res
 
 class PollView(discord.ui.View):
-    def __init__(self, pregunta):
+    def __init__(self, pregunta: str):
         super().__init__(timeout=None)
         self.pregunta = pregunta
         self.a_favor = set()
         self.en_contra = set()
 
-    @discord.ui.button(label="A Favor (0)", style=discord.ButtonStyle.success, emoji="👍", custom_id="poll_yes")
+    def _actualizar_panel(self) -> str:
+        total = len(self.a_favor) + len(self.en_contra)
+        pct_si = int((len(self.a_favor) / total) * 100) if total > 0 else 0
+        pct_no = int((len(self.en_contra) / total) * 100) if total > 0 else 0
+
+        return (
+            f"> **Propuesta:** *\"{self.pregunta}\"*\n"
+            f"> **Participación:** `{total}` votos registrados\n\n"
+            f"👍 **A Favor:** {barra_progreso(len(self.a_favor), total if total > 0 else 1)} `{pct_si}%` ({len(self.a_favor)})\n"
+            f"👎 **En Contra:** {barra_progreso(len(self.en_contra), total if total > 0 else 1)} `{pct_no}%` ({len(self.en_contra)})\n\n"
+            f"-# Utiliza los botones inferiores para emitir o revocar tu voto."
+        )
+
+    @discord.ui.button(label="A Favor", style=discord.ButtonStyle.success, emoji="👍", custom_id="poll_vote_yes")
     async def vote_yes(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = interaction.user.id
         self.en_contra.discard(uid)
@@ -25,11 +55,11 @@ class PollView(discord.ui.View):
             self.a_favor.remove(uid)
         else:
             self.a_favor.add(uid)
-        button.label = f"A Favor ({len(self.a_favor)})"
-        self.children[1].label = f"En Contra ({len(self.en_contra)})"
-        await interaction.response.edit_message(view=self)
 
-    @discord.ui.button(label="En Contra (0)", style=discord.ButtonStyle.danger, emoji="👎", custom_id="poll_no")
+        panel = formato_editorial("CONSULTA DEMOCRÁTICA // COMUNIDAD", self._actualizar_panel(), badge="POLL-TERMINAL")
+        await interaction.response.edit_message(content=panel, view=self)
+
+    @discord.ui.button(label="En Contra", style=discord.ButtonStyle.danger, emoji="👎", custom_id="poll_vote_no")
     async def vote_no(self, interaction: discord.Interaction, button: discord.ui.Button):
         uid = interaction.user.id
         self.a_favor.discard(uid)
@@ -37,101 +67,131 @@ class PollView(discord.ui.View):
             self.en_contra.remove(uid)
         else:
             self.en_contra.add(uid)
-        self.children[0].label = f"A Favor ({len(self.a_favor)})"
-        button.label = f"En Contra ({len(self.en_contra)})"
-        await interaction.response.edit_message(view=self)
 
+        panel = formato_editorial("CONSULTA DEMOCRÁTICA // COMUNIDAD", self._actualizar_panel(), badge="POLL-TERMINAL")
+        await interaction.response.edit_message(content=panel, view=self)
 
 class Utilidades(commands.Cog):
-    """Módulo de utilidades con diseño editorial y redacción IA."""
+    """Herramientas tácticas, encuestas interactivas, anuncios de alta gama y utilidades."""
     def __init__(self, bot):
         self.bot = bot
 
     @commands.Cog.listener()
-    async def on_message_delete(self, message):
+    async def on_message_delete(self, message: discord.Message):
         if message.author.bot or not message.guild:
             return
-        SNIPE_CACHE[message.channel.id] = {
+
+        SNIPE_BUFFER[message.channel.id] = {
             "autor": message.author,
-            "contenido": message.content,
+            "contenido": message.content or "*[Sin texto / Solo archivo]*",
             "adjunto": message.attachments[0].url if message.attachments else None,
             "hora": datetime.now(timezone.utc)
         }
+        SNIPE_BUFFER.move_to_end(message.channel.id)
 
-    # ─────────────────────────────────────────────────────────────
-    #  ANUNCIOS CON REDACCIÓN Y ESTILO ASISTIDOS POR IA
-    # ─────────────────────────────────────────────────────────────
-    @commands.hybrid_command(name="announce", aliases=["anuncio", "notificar"], description="La IA redacta y maqueta un anuncio profesional a partir de tu borrador")
+        if len(SNIPE_BUFFER) > MAX_SNIPE_CANALES:
+            SNIPE_BUFFER.popitem(last=False)
+
+    # ═════════════════════════════════════════════════════════════
+    #  1. COMUNICADOS EDITORIALES CON IA (ANNOUNCE)
+    # ═════════════════════════════════════════════════════════════
+    @commands.hybrid_command(name="announce", description="La IA toma tu borrador y lo convierte en un comunicado formal con diseño gráfico Markdown")
     @app_commands.describe(
-        canal="Canal donde se publicará el comunicado",
-        titulo="Tema o asunto del anuncio",
-        mensaje="Escribe tu borrador simple; la IA lo convertirá en un comunicado de lujo",
-        estilo="Tono del comunicado",
-        mencion="Mención al publicar"
+        canal="Canal donde se publicará la transmisión",
+        titulo="Asunto o encabezado del comunicado",
+        mensaje="Borrador simple con las ideas a transmitir",
+        estilo="Tono de redacción táctico",
+        mencion="Mención perimetral de audiencia"
     )
     @app_commands.choices(
         estilo=[
             app_commands.Choice(name="Formal y Ejecutivo", value="formal"),
-            app_commands.Choice(name="Comunidad y Amistoso", value="amigable"),
-            app_commands.Choice(name="Urgente / Alerta Crítica", value="alerta"),
-            app_commands.Choice(name="Cyberpunk / Táctico", value="tactico"),
+            app_commands.Choice(name="Militar / Cyberpunk Táctico", value="tactico"),
+            app_commands.Choice(name="Alerta Crítica / Seguridad", value="alerta"),
+            app_commands.Choice(name="Cálido y Comunitario", value="amigable")
         ],
         mencion=[
-            app_commands.Choice(name="Sin mención", value="none"),
+            app_commands.Choice(name="Sin Mención", value="none"),
             app_commands.Choice(name="@everyone", value="everyone"),
-            app_commands.Choice(name="@here", value="here"),
+            app_commands.Choice(name="@here", value="here")
         ]
     )
     @commands.has_permissions(administrator=True)
     async def announce(self, ctx, canal: discord.TextChannel, titulo: str, *, mensaje: str, estilo: str = "formal", mencion: str = "none"):
         await ctx.defer(ephemeral=True)
 
-        # Prompt para convertir un borrador simple en diseño editorial con Markdown de Discord
+        live = LiveActionController(ctx, "Maquetación Editorial // Comunicado IA", total_pasos=2)
+        await live.iniciar()
+
+        await live.actualizar("Estructurando redacción y maquetando sintaxis visual...", exito=True)
+
         prompt = (
-            f"Eres un experto en diseño gráfico editorial y redactor oficial de servidores de Discord de lujo.\n"
-            f"Transforma el siguiente borrador simple en un comunicado visualmente hermoso, limpio y estructurado.\n\n"
-            f"Asunto: '{titulo}'\n"
-            f"Tono seleccionado: {estilo}\n"
+            f"Eres un diseñador gráfico editorial y redactor oficial de una organización de ciberseguridad.\n"
+            f"Transforma este borrador simple en un comunicado visualmente impactante, pulcro y elegante.\n\n"
+            f"Título: '{titulo}'\n"
+            f"Estilo: '{estilo}'\n"
             f"Borrador original: \"{mensaje}\"\n\n"
-            f"Directrices de formato OBLIGATORIAS:\n"
-            f"1. Usa encabezados (# para título principal, ### para secciones).\n"
-            f"2. Utiliza blockquotes (>) para destacar ideas clave o resúmenes breves.\n"
-            f"3. Emplea viñetas ordenadas (▸) y separadores limpios (━━━━━━━━━━━━━━━━━━━━━).\n"
-            f"4. Añade un pie sutil al final con la etiqueta '-#'.\n"
-            f"5. NO uses bloques de código con ``` para el texto, déjalo libre en Markdown legible.\n"
-            f"6. NO añadas introducciones como 'Aquí tienes el anuncio:'. Devuelve ÚNICAMENTE el texto final formateado listo para publicar."
+            f"Reglas estrictas de maquetación:\n"
+            f"1. Utiliza encabezados (# y ###).\n"
+            f"2. Utiliza blockquotes (>) para conceptos clave y viñetas (▸).\n"
+            f"3. Utiliza separadores limpios (━━━━━━━━━━━━━━━━━━━━━).\n"
+            f"4. Agrega un sutil pie con '-#'.\n"
+            f"5. Devuelve ÚNICAMENTE el texto final formateado, sin comentarios introductorios."
         )
 
-        redaccion_ia = await preguntar_ia(prompt)
+        redaccion = await preguntar_ia(prompt, max_tokens=600)
+        await live.finalizar("Comunicado compilado y publicado.", error=False)
 
-        # Si la IA falla por red, usamos el borrador original con maquetación de respaldo
-        if redaccion_ia.startswith("❌") or redaccion_ia.startswith("⚠️"):
-            comunicado = (
-                f"# 📢 {titulo.upper()}\n"
-                f"> **Publicado por la Administración**\n"
-                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"{mensaje}\n\n"
-                f"-# Comunicado oficial de {ctx.guild.name}"
-            )
-        else:
-            comunicado = redaccion_ia
-
-        # Manejo de la mención
-        prefijo_mencion = ""
+        prefijo = ""
         if mencion == "everyone":
-            prefijo_mencion = "@everyone\n\n"
+            prefijo = "@everyone\n\n"
         elif mencion == "here":
-            prefijo_mencion = "@here\n\n"
+            prefijo = "@here\n\n"
 
-        # Publicar en el canal destino
-        await canal.send(f"{prefijo_mencion}{comunicado}")
-        await ctx.send(f"✨ **Comunicado publicado exitosamente en {canal.mention}.**", ephemeral=True)
+        comunicado_final = redaccion if not redaccion.startswith("❌") else f"# 📢 {titulo.upper()}\n\n{mensaje}"
+        await canal.send(f"{prefijo}{comunicado_final}")
+        await ctx.send(f"✨ **Comunicado despachado exitosamente en {canal.mention}.**", ephemeral=True)
 
-    # ─────────────────────────────────────────────────────────────
-    #  SAY LIMPIO
-    # ─────────────────────────────────────────────────────────────
-    @commands.hybrid_command(name="say", description="Transmite un mensaje directo en el canal")
-    @app_commands.describe(mensaje="Mensaje a enviar")
+    # ═════════════════════════════════════════════════════════════
+    #  2. CONSULTA COMUNITARIA EN TIEMPO REAL (POLL)
+    # ═════════════════════════════════════════════════════════════
+    @commands.hybrid_command(name="poll", description="Crea una votación comunitaria en tiempo real con barras dinámicas")
+    @app_commands.describe(pregunta="Pregunta o propuesta a someter a votación")
+    @commands.has_permissions(manage_messages=True)
+    async def poll(self, ctx, *, pregunta: str):
+        await ctx.defer()
+        view = PollView(pregunta)
+        panel = formato_editorial("CONSULTA DEMOCRÁTICA // COMUNIDAD", view._actualizar_panel(), badge="POLL-TERMINAL")
+        await ctx.send(panel, view=view)
+
+    # ═════════════════════════════════════════════════════════════
+    #  3. RADAR DE INTERCEPCIÓN (SNIPE)
+    # ═════════════════════════════════════════════════════════════
+    @commands.hybrid_command(name="snipe", description="Recupera el último mensaje destruido en este canal")
+    @commands.has_permissions(manage_messages=True)
+    async def snipe(self, ctx):
+        await ctx.defer()
+        data = SNIPE_BUFFER.get(ctx.channel.id)
+        if not data:
+            return await ctx.send("💬 **No hay transmisiones destruidas recientemente en este sector.**", ephemeral=True)
+
+        marca_t = int(data["hora"].timestamp())
+        cuerpo = (
+            f"> **Autor Original:** {data['autor'].mention} (`{data['autor'].id}`)\n"
+            f"> **Destruido:** <t:{marca_t}:R>\n\n"
+            f"**Contenido Capturado:**\n"
+            f"```{data['contenido']}```"
+        )
+        if data["adjunto"]:
+            cuerpo += f"\n📎 **Archivo Anexo:** {data['adjunto']}"
+
+        await ctx.send(formato_editorial("TRANSMISIÓN INTERCEPTADA // SNIPE", cuerpo, badge="SIGNAL-RECOVERY"))
+
+    # ═════════════════════════════════════════════════════════════
+    #  4. TRANSMISIÓN DIRECTA (SAY) Y RECORDATORIO (REMIND)
+    # ═════════════════════════════════════════════════════════════
+    @commands.hybrid_command(name="say", description="Transmite un comunicado directo a través de la identidad del bot")
+    @app_commands.describe(mensaje="Contenido de la transmisión")
     @commands.has_permissions(manage_messages=True)
     async def say(self, ctx, *, mensaje: str):
         try:
@@ -140,96 +200,51 @@ class Utilidades(commands.Cog):
             pass
         await ctx.channel.send(mensaje)
 
-    # ─────────────────────────────────────────────────────────────
-    #  POLL INTERACTIVO
-    # ─────────────────────────────────────────────────────────────
-    @commands.hybrid_command(name="poll", description="Crea una consulta comunitaria con botones en tiempo real")
-    @app_commands.describe(pregunta="Tema a someter a votación")
-    @commands.has_permissions(manage_messages=True)
-    async def poll(self, ctx, *, pregunta: str):
-        await ctx.defer()
-        cuerpo = (
-            f"## 📊 CONSULTA A LA COMUNIDAD\n"
-            f"> **Propuesta:** {pregunta}\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"*Pulsa los botones inferiores para emitir o revocar tu postura.*"
-        )
-        view = PollView(pregunta)
-        await ctx.send(cuerpo, view=view)
-
-    # ─────────────────────────────────────────────────────────────
-    #  RECORDATORIO (REMIND)
-    # ─────────────────────────────────────────────────────────────
-    @commands.hybrid_command(name="remind", description="Fija un recordatorio con aviso sonoro/mención")
-    @app_commands.describe(minutos="Minutos para el aviso", recordatorio="Motivo de la alerta")
+    @commands.hybrid_command(name="remind", description="Programa una alarma de recordatorio con notificación táctica")
+    @app_commands.describe(minutos="Minutos de espera", recordatorio="Motivo de la alarma")
     async def remind(self, ctx, minutos: int, *, recordatorio: str):
         await ctx.defer(ephemeral=True)
         if minutos <= 0:
-            return await ctx.send("⚠️ El tiempo debe ser superior a 0 minutos.", ephemeral=True)
+            return await ctx.send("⚠️ El tiempo debe ser mayor a 0 minutos.", ephemeral=True)
 
-        await ctx.send(f"⏳ **Recordatorio programado:** Te avisaré en `{minutos}` min sobre *\"{recordatorio}\"*.", ephemeral=True)
+        await ctx.send(f"⏳ **Recordatorio fijado:** Te notificaré en `{minutos}m` sobre *\"{recordatorio}\"*.", ephemeral=True)
         await asyncio.sleep(minutos * 60)
-        await ctx.channel.send(
+
+        aviso = (
             f"⏰ {ctx.author.mention}\n"
-            f"> 🔔 **RECORDATORIO PROGRAMADO:**\n"
+            f"> **Alerta Programada Cumplida:**\n"
             f"> *{recordatorio}*\n"
-            f"-# Alarma fijada hace {minutos} minutos."
+            f"-# Temporizador fijado hace {minutos} minutos."
         )
+        await ctx.channel.send(aviso)
 
-    # ─────────────────────────────────────────────────────────────
-    #  SNIPE (RECUPERADOR DE MENSAJES BORRADOS)
-    # ─────────────────────────────────────────────────────────────
-    @commands.hybrid_command(name="snipe", description="Recupera la última transmisión borrada en este canal")
-    @commands.has_permissions(manage_messages=True)
-    async def snipe(self, ctx):
-        await ctx.defer()
-        data = SNIPE_CACHE.get(ctx.channel.id)
-        if not data:
-            return await ctx.send("💬 **No hay mensajes borrados recientemente en este canal.**")
-
-        contenido = data["contenido"] or "*[Mensaje sin texto o archivo puro]*"
-        salida = (
-            f"### 🎯 Mensaje Interceptado (Snipe)\n"
-            f"> **Autor:** {data['autor'].mention} `[{data['autor'].name}]`\n"
-            f"> **Eliminado:** <t:{int(data['hora'].timestamp())}:R>\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{contenido}"
-        )
-        if data["adjunto"]:
-            salida += f"\n\n📎 **Archivo adjunto:** {data['adjunto']}"
-
-        await ctx.send(salida)
-
-    # ─────────────────────────────────────────────────────────────
-    #  TABLA DE ACTIVIDAD DE MODERADORES
-    # ─────────────────────────────────────────────────────────────
-    @commands.hybrid_command(name="staff-activity", description="Genera una tabla de intervenciones del equipo de moderación")
+    # ═════════════════════════════════════════════════════════════
+    #  5. TABLA DE RENDIMIENTO STAFF
+    # ═════════════════════════════════════════════════════════════
+    @commands.hybrid_command(name="staff-activity", description="Genera el reporte de intervenciones disciplinarias del equipo de moderación")
     @commands.has_permissions(administrator=True)
     async def staff_activity(self, ctx):
         await ctx.defer()
-        cases = cargar_cases()
+        cases = await _ejecutar_helper(cargar_cases)
+
         conteo = {}
         for c in cases.values():
-            mod = c.get("moderador_id")
-            if mod:
-                conteo[mod] = conteo.get(mod, 0) + 1
+            mid = c.get("moderador_id")
+            if mid:
+                conteo[mid] = conteo.get(mid, 0) + 1
 
         if not conteo:
-            return await ctx.send("📋 *No se registran intervenciones disciplinarias en el historial.*")
+            return await ctx.send("📋 *No se registran expedientes disciplinarios en la base de datos central.*")
 
         ordenados = sorted(conteo.items(), key=lambda x: x[1], reverse=True)
-        lineas = []
-        for i, (mid, total) in enumerate(ordenados[:10], 1):
-            lineas.append(f"`#{i:02d}` <@{mid}> ▸ **{total}** intervenciones registradas")
+        lineas = [f"`#{i:02d}` <@{mid}> ▸ **{total}** intervenciones registradas" for i, (mid, total) in enumerate(ordenados[:10], 1)]
 
-        reporte = (
-            f"# 🏆 RENDIMIENTO DE MODERACIÓN // {ctx.guild.name.upper()}\n"
-            f"> Evaluando intervenciones históricas del equipo de moderación.\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        cuerpo = (
+            f"> **Evaluación de Actividad Disciplinaria // {ctx.guild.name}**\n\n"
             + "\n".join(lineas) +
-            f"\n\n-# Registro actualizado de {ctx.guild.name} • Elixyr Security"
+            f"\n\n-# Métricas extraídas de la bóveda SQLite del SOC."
         )
-        await ctx.send(reporte)
+        await ctx.send(formato_editorial("RENDIMIENTO DE MODERACIÓN", cuerpo, badge="STAFF-METRICS"))
 
 
 async def setup(bot):

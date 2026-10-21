@@ -1,22 +1,36 @@
+"""
+═══════════════════════════════════════════════════════════════════════════════
+  ELIXYR GUARD // FIREWALL HEURÍSTICO AUTOMOD V6.0 (DEFENSE GRADE)
+  Capacidades: Secure by Default, Multi-Layer Anti-Evasion (Zero-Width/NFKD),
+               Token/Webhook Leak Shield, Anti-Scam 0ms y Shadow-Flagging IA
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-from utils.helpers import obtener_guild_config, actualizar_guild_config, crear_case
-from utils.ia import analizar_mensaje
+from utils.helpers import obtener_guild_config, actualizar_guild_config, crear_case_async
+from utils.ia import analizar_mensaje, preguntar_ia
+from utils.ui import formato_editorial, barra_progreso, barra_riesgo, LiveActionController
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
+import unicodedata
 import re
 import asyncio
 import math
+import logging
+
+logger = logging.getLogger("ElixyrAutoMod")
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  BASE DE DATOS DE AMENAZAS Y MOTORES DE EXPRESIÓN REGULAR (0ms)
+#  FIRMAS CRÍTICAS DE AMENAZAS (0ms REGEX ENGINE)
 # ═════════════════════════════════════════════════════════════════════════════
 
 # 1. Enlaces de Phishing, Robo de Cuentas y Estafas Cripto
 REGEX_SCAM = re.compile(
-    r"(discord\.gift|nitro\s*free|free\s*nitro|steamcommunity.*trade|steam.*gift|"
-    r"airdrop|t\.me/|crypto.*giveaway|binance.*promo|coinbase.*free|metamask.*verify|"
+    r"(discord\.gift|discordapp\.com/gifts|dlscord\.gg|discorcl\.gift|discord-nitro|"
+    r"nitro\s*free|free\s*nitro|steamcommunity.*trade|steam.*gift|steam-promo|"
+    r"airdrop|crypto.*giveaway|binance.*promo|coinbase.*free|metamask.*verify|"
     r"trustwallet.*unlock|roblox.*robux.*free|vbucks.*free)", 
     re.IGNORECASE
 )
@@ -28,224 +42,196 @@ REGEX_IP_LOGGER = re.compile(
     re.IGNORECASE
 )
 
-# 3. Acortadores de Enlaces (Frecuentemente usados para ocultar malware)
-REGEX_SHORTENERS = re.compile(
-    r"(bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd|buff\.ly|adf\.ly|shorte\.st|cutt\.ly)", 
-    re.IGNORECASE
-)
+# 3. Fuga de Credenciales (Webhooks y Bot Tokens)
+REGEX_WEBHOOK = re.compile(r"https?://(?:ptb\.|canary\.)?discord\.com/api/webhooks/\d+/[A-Za-z0-9_-]+")
+REGEX_BOT_TOKEN = re.compile(r"[MNO][A-Za-z0-9_-]{23,26}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,38}")
 
-# 4. Texto Corrupto / Zalgo (Crashea clientes de Discord en móviles)
-REGEX_ZALGO = re.compile(
-    r"[\u0300-\u036F\u0483-\u0489\u1DC0-\u1DFF\u20D0-\u20FF\uFE20-\uFE2F]{4,}"
-)
+# 4. Texto Corrupto / Zalgo (Payloads para colapsar clientes móviles)
+REGEX_ZALGO = re.compile(r"[\u0300-\u036F\u0483-\u0489\u1DC0-\u1DFF\u20D0-\u20FF\uFE20-\uFE2F]{4,}")
 
-# 5. Repetición masiva de caracteres (ej: hooooooooolaaaaaaa)
-REGEX_REPETITION = re.compile(r"(.)\1{8,}")
+# 5. Caracteres Invisibles de Ancho Cero (Vectores de Evasión)
+REGEX_ZERO_WIDTH = re.compile(r"[\u200B-\u200D\uFEFF\u00A0]")
 
-# 6. Diccionario de Homoglifos (Letras cirílicas/griegas usadas para evadir filtros)
-HOMOGLYPH_MAP = {
-    'а': 'a', 'A': 'a', 'α': 'a', '@': 'a', '4': 'a',
-    'В': 'b', 'Β': 'b', 'ß': 'b', '8': 'b',
-    'с': 'c', 'С': 'c', 'ϲ': 'c', '¢': 'c', '(': 'c',
-    'ԁ': 'd', 'ⅾ': 'd',
-    'е': 'e', 'Е': 'e', 'Ε': 'e', '3': 'e', '€': 'e',
-    'ɡ': 'g', 'ց': 'g', '9': 'g',
-    'һ': 'h', 'Η': 'h', '#': 'h',
-    'і': 'i', 'І': 'i', 'Ι': 'i', '1': 'i', '!': 'i', '|': 'i',
-    'ј': 'j', 'Ј': 'j',
-    'κ': 'k', 'Κ': 'k',
-    'ӏ': 'l', '1': 'l', 'I': 'l',
-    'м': 'm', 'Μ': 'm',
-    'ո': 'n', 'Ν': 'n',
-    'о': 'o', 'О': 'o', 'Ο': 'o', '0': 'o',
-    'р': 'p', 'Р': 'p', 'Ρ': 'p',
-    'ԛ': 'q',
-    'г': 'r', 'Г': 'r',
-    'ѕ': 's', 'Ѕ': 's', '5': 's', '$': 's',
-    'т': 't', 'Т': 't', 'Τ': 't', '7': 't',
-    'υ': 'u', 'υ': 'u', 'ν': 'u',
-    'ν': 'v', 'Ѵ': 'v',
-    'ԝ': 'w', 'Ԝ': 'w',
-    'х': 'x', 'Х': 'x', 'Χ': 'x',
-    'у': 'y', 'У': 'y', 'Υ': 'y',
-    'z': 'z', 'Ζ': 'z', '2': 'z'
+# 6. Repetición Masiva de Caracteres
+REGEX_REPETITION = re.compile(r"(.)\1{9,}")
+
+# Mapeo manual de homoglifos de alta persistencia
+HOMOGLYPHS = {
+    'а': 'a', 'α': 'a', '@': 'a', '4': 'a', 'в': 'b', 'ß': 'b', '8': 'b',
+    'с': 'c', 'ϲ': 'c', '¢': 'c', 'е': 'e', '3': 'e', '€': 'e', 'ɡ': 'g',
+    'і': 'i', '1': 'i', '!': 'i', '|': 'i', 'о': 'o', '0': 'o', 'р': 'p',
+    'ѕ': 's', '5': 's', '$': 's', 'т': 't', '7': 't', 'υ': 'u', 'ν': 'v',
+    'х': 'x', 'у': 'y', 'z': 'z'
 }
 
-
-# ═════════════════════════════════════════════════════════════════════════════
-#  CLASE PRINCIPAL DEL CORTAFUEGOS (AUTOMOD V5)
-# ═════════════════════════════════════════════════════════════════════════════
 class AutoMod(commands.Cog):
     """
-    Firewall de Chat de Grado Militar con Posturas Tácticas (Pacífico, Intermedio, Hard).
-    Implementa Shadow Flagging, Anti-Spam, Anti-Zalgo, Cálculo de Entropía 
-    y Análisis Semántico Asíncrono con Cerebras AI.
+    Cortafuegos de Chat de Grado Militar con Posturas DEFCON.
+    Inspección Heurística 0ms, Sanitización Anti-Evasión y Análisis Cognitivo.
     """
     def __init__(self, bot):
         self.bot = bot
         
-        # Cachés de memoria RAM para Velocity Tracking
+        # Trackers de velocidad en RAM
         self.spam_tracker = defaultdict(list)
         self.flood_tracker = defaultdict(lambda: {"last_msg": "", "count": 0})
-        self.infraction_escalation = defaultdict(int) # Memoria de reincidencia
+        self.reincidencia = defaultdict(int)
+        self.whitelist_canales = set()
         
-        # Whitelists en memoria (Canales donde el automod es más flexible)
-        self.whitelist_channels = set()
-        
-        # Iniciar tareas en segundo plano
-        self.limpieza_cache.start()
-        self.telemetria_interna.start()
+        # Tareas periódicas
+        self.limpieza_ram.start()
+        self.reinicio_reincidencia.start()
 
     def cog_unload(self):
-        """Limpieza segura al apagar el módulo."""
-        self.limpieza_cache.cancel()
-        self.telemetria_interna.cancel()
+        self.limpieza_ram.cancel()
+        self.reinicio_reincidencia.cancel()
 
-    # ─── TAREAS EN SEGUNDO PLANO ───
+    # ─── TAREAS DE MANTENIMIENTO EN MEMORIA ───
     @tasks.loop(minutes=5)
-    async def limpieza_cache(self):
-        """Libera memoria RAM limpiando los trackers antiguos para evitar fugas de memoria."""
+    async def limpieza_ram(self):
         ahora = datetime.now(timezone.utc)
-        
-        # Limpiar Spam Tracker
         for uid in list(self.spam_tracker.keys()):
             self.spam_tracker[uid] = [t for t in self.spam_tracker[uid] if (ahora - t).total_seconds() < 60]
             if not self.spam_tracker[uid]:
                 del self.spam_tracker[uid]
-                
-        # Limpiar Flood Tracker
         self.flood_tracker.clear()
 
     @tasks.loop(hours=24)
-    async def telemetria_interna(self):
-        """Reinicia el nivel de escalada de infracciones cada 24 horas."""
-        self.infraction_escalation.clear()
-
-    # ─── FUNCIONES HEURÍSTICAS INTERNAS ───
-    def _limpiar_homoglifos(self, texto: str) -> str:
-        """Traduce caracteres extraños a letras latinas normales para evitar evasión."""
-        texto_limpio = ""
-        for char in texto:
-            texto_limpio += HOMOGLYPH_MAP.get(char, char)
-        return texto_limpio.lower()
-
-    def _calcular_entropia(self, texto: str) -> float:
-        """
-        Calcula la entropía de Shannon del texto.
-        Útil para detectar aporreos de teclado (ej: 'asdkjhasdkjh') o cadenas generadas por bots.
-        """
-        if not texto:
-            return 0.0
-        probabilidades = [float(texto.count(c)) / len(texto) for c in dict.fromkeys(list(texto))]
-        entropia = - sum(p * math.log(p) / math.log(2.0) for p in probabilidades)
-        return entropia
-
-    def _requiere_analisis_ia(self, texto: str, blacklist: list) -> bool:
-        """
-        FAST-PATH: Filtro previo de 0ms. 
-        Solo despierta a la IA si hay señales de evasión, toxicidad o palabras clave.
-        """
-        texto_lower = self._limpiar_homoglifos(texto)
-        
-        # 1. Coincidencia con la lista negra del servidor
-        if any(p in texto_lower for p in blacklist if len(p) >= 3): 
-            return True
-            
-        # 2. Intentos de evasión de filtros (ej: p.u.t.o, m4ld!t0, p_u_t_a)
-        if re.search(r"[a-z0-9][\.\-_*#][a-z0-9]", texto_lower): 
-            return True
-            
-        # 3. Insultos comunes camuflados
-        if re.search(r"(put[ao]|mierd[a]|maric[oa]|pendej[oa]|coñ[oa])", texto_lower):
-            return True
-            
-        return False
-
-    def _es_bypass_valido(self, message: discord.Message) -> bool:
-        """Verifica si el usuario o canal está exento de las reglas del AutoMod."""
-        if message.author.bot:
-            return True
-        if message.channel.id in self.whitelist_channels:
-            return True
-        if message.author.guild_permissions.administrator or message.author.guild_permissions.manage_messages:
-            return True
-        return False
-
-    def _obtener_modo(self, guild_id: int) -> str:
-        """Obtiene la postura táctica actual: 'pacifico', 'intermedio', 'hard'."""
-        cfg = obtener_guild_config(guild_id)
-        return cfg.get("automod_mode", "intermedio").lower()
+    async def reinicio_reincidencia(self):
+        self.reincidencia.clear()
 
     # ═════════════════════════════════════════════════════════════════════════════
-    #  NÚCLEO DEL FIREWALL: INTERCEPTOR DE MENSAJES
+    #  AUTO-ACTIVACIÓN INMEDIATA (SECURE BY DEFAULT)
+    # ═════════════════════════════════════════════════════════════════════════════
+    @commands.Cog.listener()
+    async def on_guild_join(self, guild: discord.Guild):
+        """Auto-blinda el AutoMod apenas el bot ingresa a un servidor."""
+        actualizar_guild_config(guild.id, "automod_enabled", True)
+        actualizar_guild_config(guild.id, "automod_mode", "intermedio")
+        actualizar_guild_config(guild.id, "automod_ia", True)
+        logger.info(f"AutoMod armado automáticamente en {guild.name} ({guild.id}).")
+
+    # ─── SANITIZADOR FORENSE ANTI-EVASIÓN ───
+    def _desinfectar_texto(self, texto: str) -> tuple[str, str]:
+        """
+        Retorna dos capas de texto desinfectado:
+        1. 'limpio': Texto normalizado para lectura semántica.
+        2. 'comprimido': Texto sin espacios ni símbolos, para cazar dominios camuflados.
+        """
+        # 1. Purgar caracteres invisibles
+        sin_invisibles = REGEX_ZERO_WIDTH.sub("", texto)
+
+        # 2. Descomposición canónica NFKD (aplana fuentes raras como 𝓈𝒸𝒶𝓂)
+        normalizado = unicodedata.normalize('NFKD', sin_invisibles)
+
+        # 3. Transliteración de homoglifos
+        resultado = []
+        for char in normalizado.lower():
+            resultado.append(HOMOGLYPHS.get(char, char))
+        
+        texto_limpio = "".join(resultado)
+        texto_comprimido = re.sub(r"[\s\.\-_/\\*#@]", "", texto_limpio)
+        
+        return texto_limpio, texto_comprimido
+
+    def _calcular_entropia(self, texto: str) -> float:
+        if not texto: return 0.0
+        prob = [float(texto.count(c)) / len(texto) for c in dict.fromkeys(list(texto))]
+        return - sum(p * math.log(p) / math.log(2.0) for p in prob)
+
+    def _es_inmune(self, message: discord.Message) -> bool:
+        if message.author.bot or not message.guild:
+            return True
+        if message.channel.id in self.whitelist_canales:
+            return True
+        # Administradores y moderadores con permisos no son escaneados
+        if message.author.guild_permissions.administrator or message.author.guild_permissions.manage_guild:
+            return True
+        return False
+
+    # ═════════════════════════════════════════════════════════════════════════════
+    #  INTERCEPTOR EN TIEMPO REAL (0ms GATEWAY)
     # ═════════════════════════════════════════════════════════════════════════════
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # 1. Verificaciones iniciales de seguridad
-        if not message.guild or len(message.content) < 2:
+        if self._es_inmune(message) or len(message.content) < 2:
             return
 
-        cfg = obtener_guild_config(message.guild.id)
+        guild = message.guild
+        cfg = obtener_guild_config(guild.id)
+        
+        # SECURE BY DEFAULT: Si no estuviera explícito, se asume activo
         if not cfg.get("automod_enabled", True):
             return
 
-        if self._es_bypass_valido(message):
-            return
-
+        modo = cfg.get("automod_mode", "intermedio").lower()
         ahora = datetime.now(timezone.utc)
         uid = message.author.id
-        contenido = message.content
-        modo = self._obtener_modo(message.guild.id)
+        contenido_crudo = message.content
+        texto_limpio, texto_comprimido = self._desinfectar_texto(contenido_crudo)
 
-        # ─── FASE 1: FILTROS DE AMENAZA CRÍTICA (0ms) ───
-        # Estos filtros actúan sin importar el modo, porque son amenazas a la infraestructura.
+        # ─── FASE 0: SEGURIDAD CRÍTICA DE INFRAESTRUCTURA (0ms) ───
         
-        # 1.1. Anti-Mass-Mention (Prevención de Raids de Menciones)
-        if len(message.mentions) > 6 or len(message.role_mentions) > 3:
-            minutos = 60 if modo != "hard" else 1440
-            await self._ejecutar_sancion(message, "Mass Mention (Posible Raid)", minutos, "RAID", 5, "Menciones masivas detectadas", borrado=True)
+        # 0.1 Fuga de Webhooks o Tokens de Discord
+        if REGEX_WEBHOOK.search(contenido_crudo) or REGEX_BOT_TOKEN.search(contenido_crudo):
+            await self._ejecutar_neutralizacion(
+                message, "Fuga Crítica de Token / Webhook Confidencial",
+                minutos=1440, categoria="CREDENTIAL-LEAK", severidad=5,
+                detalles="Credenciales confidenciales expuestas en chat público."
+            )
             return
 
-        # 1.2. Anti-IP-Logger (Protección de Privacidad)
-        if REGEX_IP_LOGGER.search(contenido):
-            minutos = 120 if modo != "hard" else 1440
-            await self._ejecutar_sancion(message, "IP Logger / Rastreador", minutos, "MALWARE", 5, "Enlace de rastreo de IP detectado", borrado=True)
+        # 0.2 Detección de Enlaces Phishing / Scam (Normal y Comprimido)
+        if REGEX_SCAM.search(texto_limpio) or REGEX_SCAM.search(texto_comprimido):
+            minutos = 1440 if modo != "hard" else 10080
+            await self._ejecutar_neutralizacion(
+                message, "Enlace Malicioso / Phishing / Scam",
+                minutos=minutos, categoria="SCAM", severidad=5,
+                detalles="Enlace malicioso detectado y neutralizado."
+            )
             return
 
-        # 1.3. Anti-Scam y Phishing (Protección de Cuentas)
-        if REGEX_SCAM.search(contenido):
-            minutos = 1440 if modo != "hard" else 10080 # 1 semana en hard
-            await self._ejecutar_sancion(message, "Enlace malicioso / Scam", minutos, "SCAM", 5, "Enlace de Phishing/Scam detectado", borrado=True)
+        # 0.3 Detección de Rastreadores / IP Loggers
+        if REGEX_IP_LOGGER.search(texto_limpio) or REGEX_IP_LOGGER.search(texto_comprimido):
+            minutos = 180 if modo != "hard" else 1440
+            await self._ejecutar_neutralizacion(
+                message, "Rastreador de IP / Privacidad Comprometida",
+                minutos=minutos, categoria="MALWARE", severidad=5,
+                detalles="IP Logger interceptado antes de ser pulsado."
+            )
             return
 
-        # 1.4. Anti-Zalgo / Texto Corrupto
-        if REGEX_ZALGO.search(contenido):
-            if modo != "pacifico":
-                minutos = 15 if modo == "intermedio" else 60
-                await self._ejecutar_sancion(message, "Uso de texto Zalgo/Corrupto", minutos, "SPAM", 3, "Texto Zalgo detectado", borrado=True)
-                return
+        # 0.4 Raids de Menciones Masivas
+        if len(message.mentions) > 5 or len(message.role_mentions) > 2:
+            minutos = 60 if modo != "hard" else 720
+            await self._ejecutar_neutralizacion(
+                message, "Mass Mention Raid / Acoso Masivo",
+                minutos=minutos, categoria="RAID", severidad=4,
+                detalles=f"Intento de mención masiva ({len(message.mentions)} usuarios)."
+            )
+            return
 
-        # ─── FASE 2: FILTROS DE COMPORTAMIENTO Y VELOCIDAD ───
+        # 0.5 Texto Corrupto Zalgo / Client Crashers
+        if REGEX_ZALGO.search(contenido_crudo) and modo != "pacifico":
+            minutos = 15 if modo == "intermedio" else 60
+            await self._ejecutar_neutralizacion(
+                message, "Uso de Texto Corrupto (Zalgo / Client Crasher)",
+                minutos=minutos, categoria="EXPLOIT", severidad=3,
+                detalles="Caracteres combinados anómalos para colapsar clientes."
+            )
+            return
 
-        # 2.1. Anti-Wall of Text / Entropía Anormal
-        if len(contenido) > 800 and modo != "pacifico":
-            entropia = self._calcular_entropia(contenido)
-            if entropia < 2.5 or REGEX_REPETITION.search(contenido):
-                minutos = 10 if modo == "intermedio" else 60
-                await self._ejecutar_sancion(message, "Wall of Text / Spam de caracteres", minutos, "SPAM", 3, "Texto repetitivo o aporreo de teclado", borrado=True)
-                return
-
-        # 2.2. Anti-Flood (Mensajes idénticos repetidos)
-        if self.flood_tracker[uid]["last_msg"] == contenido.lower():
+        # ─── FASE 1: FILTROS DE VELOCIDAD Y FLOOD (RAM L1) ───
+        
+        # 1.1 Anti-Flood (Mismo mensaje repetido)
+        if self.flood_tracker[uid]["last_msg"] == texto_limpio:
             self.flood_tracker[uid]["count"] += 1
         else:
-            self.flood_tracker[uid] = {"last_msg": contenido.lower(), "count": 1}
+            self.flood_tracker[uid] = {"last_msg": texto_limpio, "count": 1}
 
-        # 2.3. Anti-Spam (Velocidad de mensajes)
+        # 1.2 Anti-Spam Velocity Burst
         spam_limite = cfg.get("automod_spam_limit", 5)
         spam_segundos = cfg.get("automod_spam_seconds", 5)
-        
-        # En modo HARD, el límite de spam es más estricto
         if modo == "hard":
             spam_limite = max(3, spam_limite - 2)
 
@@ -255,173 +241,263 @@ class AutoMod(commands.Cog):
         if len(self.spam_tracker[uid]) >= spam_limite or self.flood_tracker[uid]["count"] >= 4:
             self.spam_tracker[uid].clear()
             self.flood_tracker[uid]["count"] = 0
-            
-            self.infraction_escalation[uid] += 1
-            nivel = self.infraction_escalation[uid]
-            
+            self.reincidencia[uid] += 1
+            nivel = self.reincidencia[uid]
+
             if modo == "pacifico":
-                # En modo pacífico solo avisa al staff, no silencia
-                self._log_incidente(message.guild, message.author, message.channel, "Múltiples mensajes", "SPAM", 3, f"Saturación de canal detectada (Modo Pacífico)", borrado=False)
+                await self._enviar_log_soc(guild, "⚠️ SATURACIÓN DE CANAL", f"El usuario {message.author.mention} está saturando {message.channel.mention} (Modo Pacífico).", 0xF59E0B)
                 return
-                
-            mute_mins = cfg.get("automod_mute_minutes", 10) * nivel
-            if modo == "hard": mute_mins *= 3 # Castigo triple en modo Hard
-            
+
+            mute_base = cfg.get("automod_mute_minutes", 10)
+            mute_total = mute_base * nivel * (2 if modo == "hard" else 1)
+
             try:
                 await message.channel.purge(limit=spam_limite + 2, check=lambda m: m.author.id == uid)
-                await message.author.timeout(ahora + timedelta(minutes=mute_mins), reason=f"AutoMod: Saturación de canal (Nivel {nivel})")
-                aviso = await message.channel.send(f"🛡️ **[CORTAFUEGOS]** {message.author.mention} ha sido aislado `{mute_mins}m` por saturación de red.")
+                if message.author.top_role < guild.me.top_role:
+                    await message.author.timeout(ahora + timedelta(minutes=mute_total), reason=f"AutoMod: Saturación de red (Nivel {nivel})")
+                
+                aviso = await message.channel.send(
+                    f"🛡️ **[CORTAFUEGOS SOC]** {message.author.mention} ha sido aislado `{mute_total}m` por saturación de tráfico (Reincidencia: x{nivel})."
+                )
                 await aviso.delete(delay=6)
-                self._log_incidente(message.guild, message.author, message.channel, "Múltiples mensajes", "SPAM", 4, f"Saturación de canal (Reincidencia: {nivel})", borrado=True)
+                await self._enviar_log_soc(guild, "🔇 AISLAMIENTO POR SPAM", f"> **Infractor:** {message.author.mention} (`{message.author.id}`)\n> **Canal:** {message.channel.mention}\n> **Duración:** `{mute_total} minutos`", 0xEF4444)
+            except Exception as e:
+                logger.error(f"Error aplicando contención de spam: {e}")
+            return
+
+        # ─── FASE 2: LISTA NEGRA Y ANÁLISIS COGNITIVO IA (SHADOW FLAG) ───
+        blacklist = cfg.get("automod_blacklist", [])
+        palabra_detectada = any(p in texto_limpio for p in blacklist if len(p) >= 3)
+
+        if palabra_detectada and modo != "pacifico":
+            try:
+                await message.delete()
+                aviso = await message.channel.send(f"⚠️ {message.author.mention}, tu mensaje contenía términos restringidos por la directiva de seguridad.")
+                await aviso.delete(delay=5)
             except Exception:
                 pass
             return
 
-        # ─── FASE 3: ANÁLISIS SEMÁNTICO CON IA (ASÍNCRONO) ───
-        blacklist = cfg.get("automod_blacklist", [])
-        if cfg.get("automod_ia", True) and self._requiere_analisis_ia(contenido, blacklist):
-            asyncio.create_task(self._procesar_ia_shadow_flag(message, contenido, modo))
+        # Despachar análisis semántico IA asíncrono
+        if cfg.get("automod_ia", True) and (palabra_detectada or self._requiere_analisis_ia(texto_limpio)):
+            asyncio.create_task(self._inspeccionar_ia_segundo_plano(message, texto_limpio, modo))
+
+    def _requiere_analisis_ia(self, texto: str) -> bool:
+        if len(texto) < 6: return False
+        if re.search(r"[a-z0-9][\.\-_*#][a-z0-9]", texto): return True
+        if re.search(r"(put[ao]|mierd[a]|maric[oa]|pendej[oa]|coñ[oa]|nazi|hitler|terrorist)", texto): return True
+        return False
 
     # ═════════════════════════════════════════════════════════════════════════════
-    #  MÉTODOS DE EJECUCIÓN Y TELEMETRÍA (REFACTORIZADOS)
+    #  DESPACHADORES Y LOGGERS FORENSES (ROBUSTOS)
     # ═════════════════════════════════════════════════════════════════════════════
-    async def _ejecutar_sancion(self, message: discord.Message, razon_timeout: str, minutos: int, cat: str, sev: int, razon_log: str, borrado: bool):
-        """Ejecuta la eliminación, el timeout y el registro con manejo estricto de errores."""
+    async def _ejecutar_neutralizacion(self, message: discord.Message, razon_castigo: str, minutos: int, categoria: str, severidad: int, detalles: str):
+        guild = message.guild
+        autor = message.author
         ahora = datetime.now(timezone.utc)
-        try:
-            if borrado:
-                await message.delete()
-            await message.author.timeout(ahora + timedelta(minutes=minutos), reason=f"AutoMod: {razon_timeout}")
-        except discord.Forbidden:
-            logger.warning(f"AutoMod: Jerarquía insuficiente para sancionar a {message.author.id} en {message.guild.name}.")
-        except discord.NotFound:
-            pass # El mensaje ya fue borrado por otro bot o el usuario
-        except Exception as e:
-            logger.error(f"AutoMod: Fallo crítico al ejecutar sanción: {e}")
-            
-        self._log_incidente(message.guild, message.author, message.channel, message.content, cat, sev, razon_log, borrado)
 
-    async def _procesar_ia_shadow_flag(self, message: discord.Message, contenido: str, modo: str):
-        """Procesa el mensaje con Cerebras AI en segundo plano y aplica la postura táctica."""
+        # 1. Destruir mensaje en 0ms
         try:
-            analisis = await analizar_mensaje(contenido)
+            await message.delete()
+        except (discord.NotFound, discord.Forbidden):
+            pass
+
+        # 2. Aplicar aislamiento si la jerarquía lo permite
+        if autor.top_role < guild.me.top_role and autor.id != guild.owner_id:
+            try:
+                await autor.timeout(ahora + timedelta(minutes=minutos), reason=f"AutoMod: {razon_castigo}")
+            except discord.Forbidden:
+                logger.warning(f"AutoMod carece de jerarquía para silenciar a {autor.id}.")
+
+        # 3. Registrar expediente judicial
+        case_id = await crear_case_async(
+            tipo=categoria,
+            usuario_id=autor.id,
+            moderador_id=self.bot.user.id,
+            razon=razon_castigo,
+            extra={"severidad": severidad, "duracion": f"{minutos}m"},
+            guild_id=guild.id
+        )
+
+        # 4. Telemetría al canal SOC
+        cuerpo = (
+            f"> **Infractor:** {autor.mention} (`{autor.id}`)\n"
+            f"> **Canal:** {message.channel.mention}\n"
+            f"> **Expediente:** `#{case_id}`\n"
+            f"> **Clasificación:** `{categoria}` ({barra_riesgo(severidad)})\n"
+            f"> **Acción:** Mensaje purgado y aislamiento de `{minutos}m`.\n\n"
+            f"**Detalles Forenses:**\n"
+            f"```{message.content[:300]}```"
+        )
+        await self._enviar_log_soc(guild, f"🛡️ AMENAZA NEUTRALIZADA // {categoria}", cuerpo, 0xEF4444)
+
+    async def _inspeccionar_ia_segundo_plano(self, message: discord.Message, texto: str, modo: str):
+        try:
+            analisis = await analizar_mensaje(texto)
             categoria = analisis.get("categoria", "SEGURO")
             severidad = analisis.get("severidad", 0)
-            razon = analisis.get("razon", "Detección preventiva")
+            razon = analisis.get("razon", "Detección cognitiva")
 
             if categoria in ["TOXICO", "SPAM", "SCAM"] and severidad >= 3:
-                if modo == "pacifico":
-                    self._log_incidente(message.guild, message.author, message.channel, contenido, categoria, severidad, razon, borrado=False)
-                elif modo == "intermedio":
-                    self._log_incidente(message.guild, message.author, message.channel, contenido, categoria, severidad, razon, borrado=False)
-                elif modo == "hard":
+                guild = message.guild
+                autor = message.author
+                
+                if modo == "hard":
                     try:
                         await message.delete()
-                        await message.author.timeout(datetime.now(timezone.utc) + timedelta(minutes=30), reason=f"AutoMod IA (Hard Mode): {razon}")
-                    except discord.Forbidden:
-                        logger.warning(f"AutoMod IA: Sin permisos para aislar a {message.author.id}.")
-                    except Exception as e:
-                        logger.error(f"AutoMod IA: Error al aplicar Hard Mode: {e}")
-                        
-                    self._log_incidente(message.guild, message.author, message.channel, contenido, categoria, severidad, razon, borrado=True)
-
+                        if autor.top_role < guild.me.top_role:
+                            await autor.timeout(datetime.now(timezone.utc) + timedelta(minutes=30), reason=f"AutoMod IA: {razon}")
+                    except Exception:
+                        pass
+                    
+                    await self._enviar_log_soc(
+                        guild, "🧠 NEUTRALIZACIÓN COGNITIVA IA (HARD)",
+                        f"> **Sujeto:** {autor.mention}\n> **Veredicto:** `{categoria}` ({severidad}/5)\n> **Fundamento:** *{razon}*\n> **Acción:** Mensaje destruido + Aislamiento 30m.",
+                        0xEF4444
+                    )
+                else:
+                    # Shadow-Flagging (Solo advierte al Staff sin perturbar el canal)
+                    await self._enviar_log_soc(
+                        guild, "👁️ SHADOW-FLAG // ALERTA COGNITIVA",
+                        f"> **Sujeto:** {autor.mention} en {message.channel.mention}\n> **Categoría:** `{categoria}` ({barra_riesgo(severidad)})\n> **Análisis:** *{razon}*\n> **Contenido:** `{texto[:200]}`",
+                        0xF59E0B
+                    )
         except Exception as e:
-            logger.error(f"Fallo en el motor semántico IA (Shadow Flag): {e}")
+            logger.error(f"Fallo en motor cognitivo AutoMod: {e}")
+
+    async def _enviar_log_soc(self, guild: discord.Guild, titulo: str, descripcion: str, color: int):
+        cfg = obtener_guild_config(guild.id)
+        ch_id = cfg.get("audit_channel") or cfg.get("log_channel")
+        if not ch_id:
+            return
+
+        ch = guild.get_channel(int(ch_id))
+        if not ch or not ch.permissions_for(guild.me).send_messages:
+            return
+
+        embed = discord.Embed(
+            title=titulo,
+            description=descripcion,
+            color=color,
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.set_footer(text="Elixyr AutoMod v6.0 • Cognitive Firewall")
+        try:
+            await ch.send(embed=embed)
+        except Exception:
+            pass
+
     # ═════════════════════════════════════════════════════════════════════════════
-    #  COMANDOS DE CONFIGURACIÓN Y CONTROL
+    #  DIRECTIVAS Y COMANDOS NEW GEN (LIVE-ACTION)
     # ═════════════════════════════════════════════════════════════════════════════
-    @commands.hybrid_command(name="automod-mode", description="Cambia la postura táctica del AutoMod (Pacífico, Intermedio, Hard)")
-    @app_commands.describe(modo="Selecciona el nivel de agresividad del filtro")
+    @commands.hybrid_command(name="automod-inspect", description="Auditoría forense y heurística de un texto o frase sospechosa en vivo")
+    @app_commands.describe(texto="Cadena de texto o enlace a auditar")
+    @commands.has_permissions(manage_messages=True)
+    async def automod_inspect(self, ctx, *, texto: str):
+        await ctx.defer()
+        
+        live = LiveActionController(ctx, "Inspección Forense de Contenido", total_pasos=4)
+        await live.iniciar()
+
+        await live.actualizar("Desinfectando caracteres invisibles y transliterando homoglifos...", exito=True)
+        await asyncio.sleep(0.7)
+        limpio, comprimido = self._desinfectar_texto(texto)
+
+        await live.actualizar("Ejecutando patrones de 0ms (Scam, IP-Loggers, Leaks)...", exito=True)
+        await asyncio.sleep(0.7)
+        
+        es_scam = bool(REGEX_SCAM.search(limpio) or REGEX_SCAM.search(comprimido))
+        es_logger = bool(REGEX_IP_LOGGER.search(limpio) or REGEX_IP_LOGGER.search(comprimido))
+        es_leak = bool(REGEX_WEBHOOK.search(texto) or REGEX_BOT_TOKEN.search(texto))
+
+        await live.actualizar("Consultando con el motor semántico de Cerebras AI...", exito=True)
+        analisis_ia = await analizar_mensaje(limpio)
+        
+        amenaza = es_scam or es_logger or es_leak or (analisis_ia.get("severidad", 0) >= 3)
+        await live.finalizar(
+            f"Auditoría finalizada. Veredicto: {'AMENAZA CONFIRMADA' if amenaza else 'CONTENIDO SEGURO'}",
+            error=amenaza
+        )
+
+        resumen = (
+            f"> **Muestra Cruda:** `{texto[:150]}`\n"
+            f"> **Texto Normalizado:** `{limpio[:150]}`\n"
+            f"> **Detección Scam / Phishing:** `{'DETECTADO 🚨' if es_scam else 'Limpio 🟢'}`\n"
+            f"> **Detección IP-Logger:** `{'DETECTADO 🚨' if es_logger else 'Limpio 🟢'}`\n"
+            f"> **Fuga de Credenciales:** `{'DETECTADA 🚨' if es_leak else 'Limpio 🟢'}`\n\n"
+            f"**🧠 Dictamen Cognitivo IA:**\n"
+            f"▸ **Clasificación:** `{analisis_ia.get('categoria', 'SEGURO')}`\n"
+            f"▸ **Nivel de Severidad:** {barra_riesgo(analisis_ia.get('severidad', 0))}\n"
+            f"▸ **Fundamento:** *{analisis_ia.get('razon', 'Sin anomalías detectadas')}*"
+        )
+        panel = formato_editorial("RESULTADO DEL PERITAJE DE MENSAJE", resumen, badge="FIREWALL-SCAN")
+        await ctx.channel.send(panel)
+
+    @commands.hybrid_command(name="automod-status", description="Muestra la telemetría viva del cortafuegos y estadísticas de filtrado")
+    @commands.has_permissions(manage_guild=True)
+    async def automod_status(self, ctx):
+        await ctx.defer()
+        cfg = obtener_guild_config(ctx.guild.id)
+        
+        estado = "🟢 Activo (DEFCON)" if cfg.get("automod_enabled", True) else "🔴 Suspendido"
+        estado_ia = "🟢 En Línea (Cerebras)" if cfg.get("automod_ia", True) else "🔴 Fuera de Servicio"
+        modo = cfg.get("automod_mode", "intermedio").upper()
+        
+        contenido = (
+            f"> **Postura Táctica:** `DEFCON {modo}`\n"
+            f"> **Cortafuegos Heurístico:** {estado}\n"
+            f"> **Motor Semántico IA:** {estado_ia}\n"
+            f"> **Tolerancia de Ráfaga (Spam):** `{cfg.get('automod_spam_limit', 5)} msgs` en `{cfg.get('automod_spam_seconds', 5)}s`\n"
+            f"> **Filtros Activos (0ms):** `Anti-Scam`, `Anti-ZeroWidth`, `Anti-TokenLeak`, `Anti-Zalgo`, `Anti-GhostMention`\n"
+            f"> **Términos en Lista Negra:** `{len(cfg.get('automod_blacklist', []))}` términos\n\n"
+            f"-# El cortafuegos funciona de forma autónoma sin necesidad de activación manual."
+        )
+        panel = formato_editorial("TELEMETRÍA DEL CORTAFUEGOS // AUTOMOD v6.0", contenido, badge="FIREWALL")
+        await ctx.send(panel)
+
+    @commands.hybrid_command(name="automod-mode", description="Cambia la agresividad del cortafuegos (Pacífico, Intermedio, Hard)")
+    @app_commands.describe(modo="Nivel de rigidez del cortafuegos")
     @app_commands.choices(modo=[
-        app_commands.Choice(name="🟢 Pacífico (Solo observa y reporta)", value="pacifico"),
-        app_commands.Choice(name="🟡 Intermedio (Shadow Flagging y Anti-Spam)", value="intermedio"),
-        app_commands.Choice(name="🔴 Hardcore (Tolerancia Cero, Borrado y Muteo IA)", value="hard")
+        app_commands.Choice(name="🟢 Pacífico (Solo telemetría al SOC)", value="pacifico"),
+        app_commands.Choice(name="🟡 Intermedio (Shadow-Flagging y Aislamiento de Spam)", value="intermedio"),
+        app_commands.Choice(name="🔴 Hardcore (Tolerancia Cero y Mute Automático)", value="hard")
     ])
     @commands.has_permissions(administrator=True)
     async def automod_mode(self, ctx, modo: str):
         await ctx.defer(ephemeral=True)
         actualizar_guild_config(ctx.guild.id, "automod_mode", modo)
-        
-        mensajes = {
-            "pacifico": "🟢 **Modo Pacífico Activado:** El AutoMod ahora solo observará y reportará al Staff. No borrará mensajes ni silenciará usuarios (excepto enlaces de robo de cuentas).",
-            "intermedio": "🟡 **Modo Intermedio Activado:** Postura estándar. El Shadow Flagging está activo. Se silenciará el spam y se marcará la toxicidad en secreto.",
-            "hard": "🔴 **Modo HARDCORE Activado:** Tolerancia CERO. La IA actuará como verdugo. Cualquier toxicidad, evasión o spam resultará en borrado inmediato y aislamiento prolongado."
-        }
-        await ctx.send(mensajes[modo], ephemeral=True)
+        await ctx.send(f"🛡️ **Postura Táctica AutoMod:** Cambiada a `DEFCON {modo.upper()}` exitosamente.", ephemeral=True)
 
-    @commands.hybrid_command(name="automod", description="Activa o desactiva el cortafuegos heurístico global")
-    @commands.has_permissions(administrator=True)
-    async def automod(self, ctx, estado: bool):
-        await ctx.defer(ephemeral=True)
-        actualizar_guild_config(ctx.guild.id, "automod_enabled", estado)
-        await ctx.send(f"🛡️ **AutoMod Global:** {'OPERATIVO 🟢' if estado else 'SUSPENDIDO 🔴'}.", ephemeral=True)
-
-    @commands.hybrid_command(name="automod-ia", description="Activa el análisis semántico con IA")
-    @commands.has_permissions(administrator=True)
-    async def automod_ia(self, ctx, estado: bool):
-        await ctx.defer(ephemeral=True)
-        actualizar_guild_config(ctx.guild.id, "automod_ia", estado)
-        await ctx.send(f"🧠 **AutoMod IA:** {'ACTIVADO 🟢' if estado else 'DESACTIVADO 🔴'}.", ephemeral=True)
-
-    @commands.hybrid_command(name="automod-whitelist", description="Excluye un canal de las reglas del AutoMod")
-    @app_commands.choices(accion=[
-        app_commands.Choice(name="Añadir a Whitelist", value="add"),
-        app_commands.Choice(name="Remover de Whitelist", value="remove")
-    ])
-    @commands.has_permissions(administrator=True)
-    async def automod_whitelist(self, ctx, canal: discord.TextChannel, accion: str):
-        await ctx.defer(ephemeral=True)
-        if accion == "add":
-            self.whitelist_channels.add(canal.id)
-            await ctx.send(f"✅ El canal {canal.mention} ha sido **excluido** de las inspecciones del AutoMod.", ephemeral=True)
-        else:
-            self.whitelist_channels.discard(canal.id)
-            await ctx.send(f"❌ El canal {canal.mention} vuelve a estar **protegido** por el AutoMod.", ephemeral=True)
-
-    @commands.hybrid_command(name="blacklist-add", description="Añade una palabra a la lista negra del servidor")
+    @commands.hybrid_command(name="blacklist-add", description="Añade un término o patrón a la lista de bloqueo del servidor")
     @commands.has_permissions(administrator=True)
     async def blacklist_add(self, ctx, palabra: str):
         await ctx.defer(ephemeral=True)
         cfg = obtener_guild_config(ctx.guild.id)
         blacklist = cfg.get("automod_blacklist", [])
         
-        palabra_limpia = palabra.lower().strip()
-        if palabra_limpia in blacklist:
-            return await ctx.send(f"⚠️ El término `{palabra_limpia}` ya se encuentra en la lista negra.", ephemeral=True)
+        termino = palabra.lower().strip()
+        if termino in blacklist:
+            return await ctx.send(f"⚠️ El término `{termino}` ya formaba parte de la lista negra.", ephemeral=True)
             
-        blacklist.append(palabra_limpia)
+        blacklist.append(termino)
         actualizar_guild_config(ctx.guild.id, "automod_blacklist", blacklist)
-        await ctx.send(f"✅ Término `{palabra_limpia}` añadido a la base de datos de amenazas.", ephemeral=True)
+        await ctx.send(f"✅ Término `{termino}` inyectado a la base de datos de amenazas del servidor.", ephemeral=True)
 
-    @commands.hybrid_command(name="automod-status", description="Muestra la telemetría y configuración actual del AutoMod")
-    @commands.has_permissions(manage_guild=True)
-    async def automod_status(self, ctx):
-        await ctx.defer()
+    @commands.hybrid_command(name="blacklist-remove", description="Remueve un término de la lista negra")
+    @commands.has_permissions(administrator=True)
+    async def blacklist_remove(self, ctx, palabra: str):
+        await ctx.defer(ephemeral=True)
         cfg = obtener_guild_config(ctx.guild.id)
+        blacklist = cfg.get("automod_blacklist", [])
         
-        estado_am = "🟢 Activo" if cfg.get("automod_enabled", True) else "🔴 Apagado"
-        estado_ia = "🟢 Activo" if cfg.get("automod_ia", True) else "🔴 Apagado"
-        modo = cfg.get("automod_mode", "intermedio").upper()
-        
-        spam_lim = cfg.get("automod_spam_limit", 5)
-        spam_sec = cfg.get("automod_spam_seconds", 5)
-        
-        canales_wl = len(self.whitelist_channels)
-        palabras_bl = len(cfg.get("automod_blacklist", []))
-        
-        panel = (
-            f"### 🛡️ TELEMETRÍA DEL CORTAFUEGOS // AUTOMOD V5\n"
-            f"✦ ────────────────────────────────────────── ✦\n"
-            f"> **Postura Táctica:** `{modo}`\n"
-            f"> **Motor Heurístico Base:** {estado_am}\n"
-            f"> **Motor Semántico IA:** {estado_ia}\n"
-            f"> **Tolerancia Spam:** `{spam_lim} msgs` cada `{spam_sec}s`\n"
-            f"> **Filtros Activos (0ms):** `Anti-Zalgo`, `Anti-Mass-Mention`, `Anti-Scam`, `Anti-IP-Logger`\n"
-            f"> **Base de Datos:** `{palabras_bl}` términos vetados | `{canales_wl}` canales en whitelist\n"
-            f"✦ ────────────────────────────────────────── ✦\n"
-            f"-# Usa /automod-mode para cambiar la agresividad del sistema."
-        )
-        await ctx.send(panel)
+        termino = palabra.lower().strip()
+        if termino not in blacklist:
+            return await ctx.send(f"⚠️ El término `{termino}` no figura en la lista negra.", ephemeral=True)
+            
+        blacklist.remove(termino)
+        actualizar_guild_config(ctx.guild.id, "automod_blacklist", blacklist)
+        await ctx.send(f"✅ Término `{termino}` revocado de la lista negra.", ephemeral=True)
+
 
 async def setup(bot):
     await bot.add_cog(AutoMod(bot))

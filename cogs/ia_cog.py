@@ -1,160 +1,178 @@
+"""
+═══════════════════════════════════════════════════════════════════════════════
+  ELIXYR GUARD // COGNITIVE CONVERSATIONAL CORE (NEW GEN v6.0)
+  Capacidades: Memoria Virtual Acotada (Anti-Leak), Inferencia Conversacional,
+               Soporte Asíncrono por Referencia y Purga de Sesiones Inactivas
+═══════════════════════════════════════════════════════════════════════════════
+"""
+
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 import time
 import logging
-from collections import defaultdict
+from collections import OrderedDict
 from utils.ia import preguntar_ia, resumir_texto
+from utils.ui import formato_editorial
 
 logger = logging.getLogger("ElixyrIA")
 
-# ─────────────────────────────────────────────────────────────
-#  GESTOR DE MEMORIA VIRTUAL CONVERSACIONAL
-# ─────────────────────────────────────────────────────────────
-MEMORIA_USUARIOS = defaultdict(dict)
+# Memoria acotada: Máximo 250 sesiones simultáneas en RAM para evitar fugas
+MAX_SESIONES_ACTIVAS = 250
+MAX_TURNOS_MEMORIA = 20
+TIEMPO_EXPIRACION = 3600  # 1 hora
 
-MAX_HISTORIAL_TURNOS = 30   
-TIEMPO_INACTIVIDAD = 7200    # 2 Horas
+MEMORIA_LRU = OrderedDict()
 
-def _obtener_historial(user_id: int) -> list:
+def _gestionar_memoria(user_id: int) -> list:
     ahora = time.time()
-    sesion = MEMORIA_USUARIOS.get(user_id)
-    if not sesion:
-        return []
+    if user_id in MEMORIA_LRU:
+        sesion = MEMORIA_LRU[user_id]
+        if ahora - sesion.get("ultimo_acceso", 0) > TIEMPO_EXPIRACION:
+            del MEMORIA_LRU[user_id]
+            return []
+        MEMORIA_LRU.move_to_end(user_id)
+        return list(sesion.get("mensajes", []))
+    return []
 
-    if ahora - sesion.get("ultimo_acceso", 0) > TIEMPO_INACTIVIDAD:
-        MEMORIA_USUARIOS[user_id] = {"ultimo_acceso": ahora, "mensajes": []}
-        return []
-
-    return list(sesion.get("mensajes", []))
-
-def _guardar_en_memoria(user_id: int, pregunta: str, respuesta: str):
+def _guardar_memoria(user_id: int, pregunta: str, respuesta: str):
     ahora = time.time()
-    mensajes = _obtener_historial(user_id)
-
+    mensajes = _gestionar_memoria(user_id)
     mensajes.append({"role": "user", "content": pregunta})
     mensajes.append({"role": "assistant", "content": respuesta})
 
-    if len(mensajes) > MAX_HISTORIAL_TURNOS:
-        mensajes = mensajes[-MAX_HISTORIAL_TURNOS:]
+    if len(mensajes) > MAX_TURNOS_MEMORIA:
+        mensajes = mensajes[-MAX_TURNOS_MEMORIA:]
 
-    MEMORIA_USUARIOS[user_id] = {
-        "ultimo_acceso": ahora,
-        "mensajes": mensajes
-    }
+    MEMORIA_LRU[user_id] = {"ultimo_acceso": ahora, "mensajes": mensajes}
+    MEMORIA_LRU.move_to_end(user_id)
 
-def dividir_texto(texto: str, limite: int = 1900) -> list:
+    # Desalojar la sesión más antigua si se excede el límite
+    if len(MEMORIA_LRU) > MAX_SESIONES_ACTIVAS:
+        MEMORIA_LRU.popitem(last=False)
+
+def partir_bloques_texto(texto: str, limite: int = 1900) -> list:
     if len(texto) <= limite:
         return [texto]
-    fragmentos = []
+    partes = []
     while len(texto) > limite:
         corte = texto.rfind("\n", 0, limite)
-        if corte == -1: corte = texto.rfind(" ", 0, limite)
-        if corte == -1: corte = limite
-        fragmentos.append(texto[:corte].strip())
+        if corte == -1:
+            corte = texto.rfind(" ", 0, limite)
+        if corte == -1:
+            corte = limite
+        partes.append(texto[:corte].strip())
         texto = texto[corte:].strip()
-    if texto: fragmentos.append(texto)
-    return fragmentos
+    if texto:
+        partes.append(texto)
+    return partes
 
 class IA(commands.Cog):
-    """Módulo conversacional abierto con memoria de contexto natural."""
+    """Módulo conversacional abierto con enlace neuronal persistente y memoria protegida."""
     def __init__(self, bot):
         self.bot = bot
-        self.garbage_collector.start()
+        self.recolector_sesiones.start()
 
     def cog_unload(self):
-        self.garbage_collector.cancel()
+        self.recolector_sesiones.cancel()
 
-    # ─── RECOLECTOR DE BASURA (PREVIENE FUGAS DE RAM) ───
-    @tasks.loop(minutes=30)
-    async def garbage_collector(self):
-        """Purga sesiones inactivas de la memoria RAM."""
+    @tasks.loop(minutes=20)
+    async def recolector_sesiones(self):
         ahora = time.time()
-        purgados = 0
-        # Usamos list() para no modificar el dict mientras iteramos
-        for uid in list(MEMORIA_USUARIOS.keys()):
-            if ahora - MEMORIA_USUARIOS[uid].get("ultimo_acceso", 0) > TIEMPO_INACTIVIDAD:
-                del MEMORIA_USUARIOS[uid]
-                purgados += 1
-        if purgados > 0:
-            logger.info(f"Garbage Collector: {purgados} sesiones de IA inactivas purgadas de la RAM.")
+        purgadas = 0
+        for uid in list(MEMORIA_LRU.keys()):
+            if ahora - MEMORIA_LRU[uid].get("ultimo_acceso", 0) > TIEMPO_EXPIRACION:
+                del MEMORIA_LRU[uid]
+                purgadas += 1
+        if purgadas > 0:
+            logger.info(f"Recolector IA: {purgadas} sesiones inactivas purgadas de la memoria RAM.")
 
+    # ─── RESPUESTA CONVERSACIONAL POR MENCIÓN O CITA DIRECTA ───
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or not message.content:
             return
 
+        es_mencion_directa = self.bot.user in message.mentions and not message.mention_everyone
         es_respuesta_al_bot = False
+
         if message.reference and message.reference.message_id:
             try:
-                ref_msg = message.reference.resolved
-                if not isinstance(ref_msg, discord.Message):
-                    ref_msg = await message.channel.fetch_message(message.reference.message_id)
-                if ref_msg and ref_msg.author.id == self.bot.user.id:
+                ref = message.reference.resolved
+                if not isinstance(ref, discord.Message):
+                    ref = await message.channel.fetch_message(message.reference.message_id)
+                if ref and ref.author.id == self.bot.user.id:
                     es_respuesta_al_bot = True
-            except discord.NotFound:
+            except Exception:
                 pass
+
+        if es_mencion_directa or es_respuesta_al_bot:
+            contenido_limpio = message.clean_content.replace(f"@{self.bot.user.display_name}", "").strip()
+            if not contenido_limpio:
+                return
+
+            try:
+                async with message.channel.typing():
+                    historial = _gestionar_memoria(message.author.id)
+                    payload = list(historial)
+                    payload.append({"role": "user", "content": contenido_limpio})
+
+                    respuesta = await preguntar_ia(historial=payload, max_tokens=1000)
+
+                    if respuesta.startswith("❌") or respuesta.startswith("⚠️"):
+                        return await message.reply("⚠️ *Micro-interrupción en el enlace neuronal con Cerebras. Reintenta tu transmisión.*", mention_author=False)
+
+                    _guardar_memoria(message.author.id, contenido_limpio, respuesta)
+
+                    for bloque in partir_bloques_texto(respuesta):
+                        await message.reply(bloque, mention_author=False)
             except Exception as e:
-                logger.warning(f"Error al resolver referencia de mensaje: {e}")
+                logger.error(f"Error procesando conversación interactiva: {e}")
 
-        if es_respuesta_al_bot:
-            async with message.channel.typing():
-                historial = _obtener_historial(message.author.id)
-                payload = list(historial)
-                payload.append({"role": "user", "content": message.content})
-
-                respuesta = await preguntar_ia(historial=payload)
-
-                if respuesta.startswith("❌") or respuesta.startswith("⚠️"):
-                    logger.error(f"Fallo de inferencia IA para el usuario {message.author.id}")
-                    await message.reply("Lo siento, se me fue la onda un momento con la conexión. ¿Me lo repites?", mention_author=False)
-                    return
-
-                _guardar_en_memoria(message.author.id, message.content, respuesta)
-
-                for parte in dividir_texto(respuesta):
-                    await message.reply(parte, mention_author=False)
-
-    @commands.hybrid_command(name="ask", aliases=["ia", "chat", "pregunta"], description="Conversa libremente con la IA")
-    @app_commands.describe(pregunta="¿De qué quieres hablar o qué quieres consultar?")
+    # ═════════════════════════════════════════════════════════════
+    #  COMANDOS COGNITIVOS PRINCIPALES
+    # ═════════════════════════════════════════════════════════════
+    @commands.hybrid_command(name="ask", aliases=["ia", "cerebras"], description="Consulta o conversa libremente con el motor cognitivo Cerebras AI")
+    @app_commands.describe(pregunta="Pregunta, planteamiento o tarea para la IA")
     async def ask(self, ctx, *, pregunta: str):
         await ctx.defer()
-        historial = _obtener_historial(ctx.author.id)
+        historial = _gestionar_memoria(ctx.author.id)
         payload = list(historial)
         payload.append({"role": "user", "content": pregunta})
 
-        respuesta = await preguntar_ia(historial=payload)
+        respuesta = await preguntar_ia(historial=payload, max_tokens=1200)
 
         if respuesta.startswith("❌") or respuesta.startswith("⚠️"):
-            logger.error(f"Fallo de inferencia IA en comando /ask para {ctx.author.id}")
-            return await ctx.send("Disculpa, se cayó la conexión un segundo. Prueba enviando el mensaje otra vez.")
+            return await ctx.send("⚠️ *El enlace neuronal no respondió a tiempo. Intenta formular tu consulta de nuevo.*")
 
-        _guardar_en_memoria(ctx.author.id, pregunta, respuesta)
+        _guardar_memoria(ctx.author.id, pregunta, respuesta)
 
-        partes = dividir_texto(respuesta)
-        for i, parte in enumerate(partes):
+        partes = partir_bloques_texto(respuesta)
+        for i, p in enumerate(partes):
             if i == 0:
-                await ctx.send(f"> 💬 *{ctx.author.display_name}:* {pregunta}\n\n{parte}")
+                await ctx.send(f"> 💬 *{ctx.author.display_name}:* {pregunta}\n\n{p}")
             else:
-                await ctx.send(parte)
+                await ctx.send(p)
 
-    @commands.hybrid_command(name="olvidar", description="Inicia un chat nuevo desde cero")
+    @commands.hybrid_command(name="olvidar", description="Reinicia la memoria de tu conversación activa con la IA")
     async def olvidar(self, ctx):
-        if ctx.author.id in MEMORIA_USUARIOS:
-            del MEMORIA_USUARIOS[ctx.author.id]
-            await ctx.send("✨ **Chat reiniciado.** Olvidé lo que veníamos hablando. ¡Empezamos de cero!", ephemeral=True)
+        if ctx.author.id in MEMORIA_LRU:
+            del MEMORIA_LRU[ctx.author.id]
+            await ctx.send("✨ **Buffer de conversación purgado.** Empezamos desde cero.", ephemeral=True)
         else:
-            await ctx.send("✦ Ya teníamos un chat limpio, no había nada guardado.", ephemeral=True)
+            await ctx.send("✦ No tenías ningún hilo de conversación activo en la memoria RAM.", ephemeral=True)
 
-    @commands.hybrid_command(name="resumir", description="Resume artículos, párrafos o textos extensos")
+    @commands.hybrid_command(name="resumir", description="Sintetiza textos extensos o documentos en viñetas ejecutivas")
+    @app_commands.describe(texto="Párrafo o documento a resumir")
     async def resumir(self, ctx, *, texto: str):
         await ctx.defer()
-        if len(texto) < 25:
-            return await ctx.send("El texto es muy corto para resumirlo.")
+        if len(texto) < 30:
+            return await ctx.send("⚠️ El texto proporcionado es demasiado corto para sintetizar.", ephemeral=True)
 
         resumen = await resumir_texto(texto)
-        for parte in dividir_texto(f"📋 **Aquí tienes los puntos clave:**\n\n{resumen}"):
-            await ctx.send(parte)
+        cuerpo = f"**Síntesis Ejecutiva:**\n\n{resumen}"
+        await ctx.send(formato_editorial("RESUMEN ASISTIDO POR IA", cuerpo, badge="SYNTHESIS"))
+
 
 async def setup(bot):
     await bot.add_cog(IA(bot))
